@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.ipynb_checkpoints/
+
+data/*
+!data/.gitignore
+
+plots/*
+!plots/.gitignore
+
+*.gif
+!assets/*.gif
+*.mp4
+*.avi
+*.xlsx
+*.csv

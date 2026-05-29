@@ -5,7 +5,7 @@ This repository contains the Python code accompanying the paper
 > [Where To Put Safety? Control Barrier Function Placement in Networked Control Systems](https://arxiv.org/abs/2603.29792)
 > by S. Beger, Y. Chen and S. Hirche.
 
-submitted to L-CSS Letters 2026.
+submitted to IEEE Control System Letters 2026.
 
 <p align="center">
 <img src="assets/robot.gif" alt="GIF of a robot simulation from this repo" width="600"/>

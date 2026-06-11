@@ -8,12 +8,12 @@ Expected folder structure:
         trial_0/
             LocalCBF/
                 run_metrics.csv
-            RemoteMPC-CBF/
+            MPC-CBF/
                 run_metrics.csv
         trial_1/
             LocalCBF/
                 run_metrics.csv
-            RemoteMPC-CBF/
+            MPC-CBF/
                 run_metrics.csv
         ...
 
@@ -231,6 +231,11 @@ def summarize_monte_carlo_by_architecture(
         # Safety
         "min_signed_clearance": np.nan,
         "min_cbf_value": np.nan,
+        "stayed_with_margin": False,
+        "min_raw_clearance": np.nan,
+        "collision_count": 0.0,
+        "collision_step_count": 0.0,
+        "max_collision_depth": 0.0,
 
         # Performance
         "time_to_goal": np.nan,
@@ -275,6 +280,8 @@ def summarize_monte_carlo_by_architecture(
         safe = _as_bool_series(group["stayed_safe"])
         safe_and_reached = _as_bool_series(group["safe_and_reached"])
         had_violation = _as_bool_series(group["had_safety_violation"])
+        with_margin = _as_bool_series(group["stayed_with_margin"])
+        collision_count = _numeric(group["collision_count"])    
 
         reached_group = group[reached]
 
@@ -292,6 +299,12 @@ def summarize_monte_carlo_by_architecture(
             "mean_min_cbf_value": _mean(group["min_cbf_value"]),
             "worst_min_cbf_value": _min(group["min_cbf_value"]),
             "violation_run_rate": float(had_violation.mean()),
+            "margin_respected_rate": float(with_margin.mean()),
+            "mean_min_raw_clearance": _mean(group["min_raw_clearance"]),
+            "worst_min_raw_clearance": _min(group["min_raw_clearance"]),
+            "collision_run_rate": float((_numeric(group["collision_step_count"]).fillna(0) > 0).mean()),
+            "mean_collision_step_count": _mean(group["collision_step_count"]),
+            "max_collision_depth": _max(group["max_collision_depth"]),
 
             # Performance
             "mean_time_to_goal": _mean(reached_group["time_to_goal"]) if len(reached_group) else np.nan,
@@ -334,7 +347,7 @@ def summarize_monte_carlo_by_architecture(
     summary = pd.DataFrame(rows)
 
     # Stable, useful architecture ordering.
-    preferred_order = ["Nominal", "LocalCBF", "RemoteMPC-CBF", "Combined"]
+    preferred_order = ["Nominal", "LocalCBF", "MPC-CBF", "Combined"]
     summary["architecture_order"] = summary["architecture"].apply(
         lambda x: preferred_order.index(x) if x in preferred_order else len(preferred_order)
     )
@@ -353,6 +366,12 @@ def summarize_monte_carlo_by_architecture(
         "mean_min_cbf_value",
         "worst_min_cbf_value",
         "violation_run_rate",
+        "margin_respected_rate",
+        "mean_min_raw_clearance",
+        "worst_min_raw_clearance",
+        "collision_run_rate",
+        "mean_collision_step_count",
+        "max_collision_depth",
 
         "mean_time_to_goal",
         "std_time_to_goal",
@@ -437,6 +456,11 @@ def analyse_monte_carlo_run(
 def print_monte_carlo_summary(summary: pd.DataFrame) -> None:
     """
     Compact console printout for the selected criteria.
+
+    Safety convention:
+        safe_rate              = collision-free rate, i.e. min_raw_clearance >= 0
+        margin_respected_rate  = rate of respecting inflated CBF margin
+        collision_run_rate     = rate of runs with physical obstacle penetration
     """
     if summary.empty:
         print("No Monte Carlo summary data available.")
@@ -445,23 +469,37 @@ def print_monte_carlo_summary(summary: pd.DataFrame) -> None:
     display_cols = [
         "architecture",
         "n_runs",
+
+        # Safety: explicit convention
         "safe_rate",
+        "margin_respected_rate",
+        "collision_run_rate",
+        "worst_min_raw_clearance",
+        "worst_min_signed_clearance",
+
+        # Success
         "reach_rate",
         "safe_and_reached_rate",
+
+        # Performance
         "mean_cost_per_step",
         "mean_time_to_goal",
-        "worst_min_signed_clearance",
+
+        # CBF activity
         "mean_local_cbf_activation_rate",
         "mean_remote_cbf_activation_rate",
     ]
 
+    display_cols = [c for c in display_cols if c in summary.columns]
+
     print("\n" + "=" * 120)
     print("MONTE CARLO ARCHITECTURE SUMMARY")
+    print("Safety convention: safe_rate = collision-free; margin_respected_rate = CBF buffer respected")
     print("=" * 120)
 
     with pd.option_context(
         "display.max_columns", None,
-        "display.width", 180,
+        "display.width", 200,
         "display.float_format", "{:.4f}".format,
     ):
         print(summary[display_cols].to_string(index=False))
@@ -492,12 +530,21 @@ def analyse_disturbance_sweep(
     selected_columns = [
         "disturbance_bound",
         "architecture",
+
         "safe_rate",
+        "margin_respected_rate",
+        "collision_run_rate",
         "reach_rate",
         "safe_and_reached_rate",
+
+        "mean_min_raw_clearance",
+        "worst_min_raw_clearance",
+        "mean_min_signed_clearance",
+        "worst_min_signed_clearance",
+
         "mean_cost_per_step",
         "mean_time_to_goal",
-        "mean_min_signed_clearance",
+
         "mean_local_cbf_activation_rate",
         "mean_remote_cbf_activation_rate",
         "mean_remote_mpc_slack_sum",
@@ -545,7 +592,7 @@ def analyse_disturbance_sweep(
     architecture_order = {
         "Nominal": 0,
         "LocalCBF": 1,
-        "RemoteMPC-CBF": 2,
+        "MPC-CBF": 2,
         "Combined": 3,
     }
 
@@ -572,7 +619,7 @@ def analyse_disturbance_sweep(
                 )
 
                 # Optional pivot tables for quick inspection.
-                for metric in ["safe_rate", "reach_rate", "mean_cost_per_step"]:
+                for metric in ["safe_rate", "margin_respected_rate", "collision_run_rate", "reach_rate", "mean_cost_per_step"]:
                     pivot = sweep_summary.pivot_table(
                         index="disturbance_bound",
                         columns="architecture",
@@ -593,21 +640,30 @@ def print_disturbance_sweep_summary(sweep_summary: pd.DataFrame) -> None:
     display_cols = [
         "disturbance_bound",
         "architecture",
+
         "safe_rate",
+        "margin_respected_rate",
+        "collision_run_rate",
         "reach_rate",
         "safe_and_reached_rate",
+
+        "worst_min_raw_clearance",
+        "worst_min_signed_clearance",
+
         "mean_cost_per_step",
         "mean_time_to_goal",
-        "mean_min_signed_clearance",
     ]
+
+    display_cols = [c for c in display_cols if c in sweep_summary.columns]
 
     print("\n" + "=" * 120)
     print("DISTURBANCE SWEEP SUMMARY")
+    print("Safety convention: safe_rate = collision-free; margin_respected_rate = CBF buffer respected")
     print("=" * 120)
 
     with pd.option_context(
         "display.max_columns", None,
-        "display.width", 160,
+        "display.width", 180,
         "display.float_format", "{:.4f}".format,
     ):
         print(sweep_summary[display_cols].to_string(index=False))
@@ -653,15 +709,21 @@ def analyse_delay_sweep(
         # reliability
         "n_runs",
         "safe_rate",
+        "margin_respected_rate",
+        "collision_run_rate",
         "reach_rate",
         "safe_and_reached_rate",
 
         # safety
+        "mean_min_raw_clearance",
+        "worst_min_raw_clearance",
         "mean_min_signed_clearance",
         "worst_min_signed_clearance",
         "mean_min_cbf_value",
         "worst_min_cbf_value",
         "violation_run_rate",
+        "mean_collision_step_count",
+        "max_collision_depth",
 
         # performance
         "mean_time_to_goal",
@@ -748,7 +810,7 @@ def analyse_delay_sweep(
     architecture_order = {
         "Nominal": 0,
         "LocalCBF": 1,
-        "RemoteMPC-CBF": 2,
+        "MPC-CBF": 2,
         "Combined": 3,
     }
 
@@ -783,8 +845,12 @@ def analyse_delay_sweep(
                 # Useful pivot tables for quick inspection.
                 pivot_metrics = [
                     "safe_rate",
+                    "margin_respected_rate",
+                    "collision_run_rate",
                     "reach_rate",
                     "safe_and_reached_rate",
+                    "mean_min_raw_clearance",
+                    "worst_min_raw_clearance",
                     "mean_min_signed_clearance",
                     "worst_min_signed_clearance",
                     "mean_cost_per_step",
@@ -845,11 +911,16 @@ def print_delay_sweep_summary(sweep_summary: pd.DataFrame) -> None:
     display_cols = [
         "delay",
         "architecture",
+
         "safe_rate",
+        "margin_respected_rate",
+        "collision_run_rate",
         "reach_rate",
         "safe_and_reached_rate",
-        "mean_min_signed_clearance",
+
+        "worst_min_raw_clearance",
         "worst_min_signed_clearance",
+
         "mean_cost_per_step",
         "mean_time_to_goal",
     ]
@@ -858,6 +929,7 @@ def print_delay_sweep_summary(sweep_summary: pd.DataFrame) -> None:
 
     print("\n" + "=" * 120)
     print("DELAY SWEEP SUMMARY")
+    print("Safety convention: safe_rate = collision-free; margin_respected_rate = CBF buffer respected")
     print("=" * 120)
 
     with pd.option_context(

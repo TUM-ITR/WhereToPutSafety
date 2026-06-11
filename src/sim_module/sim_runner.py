@@ -25,21 +25,23 @@ from controller_module.remote_mpc_cbf import RemoteController
 from controller_module.pd_plus import PDPlusController
 from predictor_module.state_predictor import StatePredictor
 from sim_module.data_recorder import DataRecorder
-from helper.analysis.visualization_export import generate_visualizations
+from helper.plot_code.plotting_3dof import plot_3dof_compare_results, generate_visualizations
 from helper.analysis.post_processing import post_process_single_run, print_run_summary
 from helper.analysis.post_processing_MonteCarlo import (
     analyse_monte_carlo_run,
     analyse_disturbance_sweep,
     analyse_delay_sweep,
 )
-from helper.analysis.plots_for_paper import (
+from helper.plot_code.plots_for_paper import (
     plot_workspace,
     plot_workspace_comparison,
     plot_min_distance_to_obstacle,
     plot_min_clearance_over_delay,
+    plot_min_clearance_over_disturbance
 )
 
-def single_run(params: SystemParams, arch_name: str, base_out_dir: str, noise: Optional[np.ndarray] = None, verbose: bool = True, plotting: bool = True) -> None:
+def single_run(params: SystemParams, arch_name: str, base_out_dir: str, noise: Optional[np.ndarray] = None, verbose: bool = True, 
+               plotting: bool = True, animation: bool = False) -> None:
     """ To run a single architecture"""
     t0 = time.time()
 
@@ -61,7 +63,7 @@ def single_run(params: SystemParams, arch_name: str, base_out_dir: str, noise: O
     dynamics = RobotDynamics(params,noise)
     
     # initialize remote MPC
-    remote_controller = RemoteController(params, dynamics) # TODO: make proper initialization sure
+    remote_controller = RemoteController(params, dynamics)
     
     #local_cbf = LocalCBF(params,dynamics)
     if(params.use_local_cbf):
@@ -233,7 +235,7 @@ def single_run(params: SystemParams, arch_name: str, base_out_dir: str, noise: O
                 ee_states_true[remaining_k, :2] = ee_true
                 ee_states_true[remaining_k, 2:] = np.zeros(2)
                 if remaining_k < max_steps - 1:
-                    U_alpha[remaining_k] = np.zeros(3)
+                    U_alpha[remaining_k] = u #np.zeros(3)
             break
 
         
@@ -394,8 +396,10 @@ def single_run(params: SystemParams, arch_name: str, base_out_dir: str, noise: O
     pr_ref[:] = final_target
 
     
-    params.out_plot = "sim_plot.png"
-    params.out_anim = "sim_animation.gif"
+    if(plotting):
+        params.out_plot = "sim_plot.png"
+    if(animation):
+        params.out_anim = "sim_animation.gif"
     
     import pandas as pd
     df_detailed = pd.read_csv(os.path.join(params.out_dir, f"{params.scenario_name}_{arch_name}_data.csv"))
@@ -433,7 +437,7 @@ def _architecture_variables(arch_name: str):
     match arch_name:
         case "LocalCBF":
             use_local_cbf = True
-        case "RemoteMPC-CBF":
+        case "MPC-CBF":
             use_remote_cbf = True
             mpc_use_CBF = True
         case "Combined":
@@ -458,11 +462,11 @@ def fast_predict(dynamics,params,z_delayed, input_seq):
 
 
 ############## Simulation Runners ################
-def run_all_architectures(params:SystemParams, with_disturbances: bool = False):
+def run_all_architectures(params:SystemParams, with_disturbances: bool = False, make_plots: bool = True, make_animation: bool = False, make_summary_plots: bool = False):
 
     # Create Folder for saving data
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_out_dir = f"data/simulation_results_architecture_comparison_{timestamp}"
+    base_out_dir = f"data/comparison/comparison_{timestamp}"
     os.makedirs(base_out_dir, exist_ok=True)
 
     #save params
@@ -481,30 +485,43 @@ def run_all_architectures(params:SystemParams, with_disturbances: bool = False):
     print("=" * 60)
     print("RUNNING ARCHITECTURE 0: NOMINAL MPC (No CBF)")
     print("=" * 60)
-    dir_local, elapsedTime = single_run(params,"Nominal", base_out_dir=base_out_dir,noise = disturbances)
+    dir_local, elapsedTime = single_run(params,"Nominal", base_out_dir=base_out_dir,noise = disturbances,
+                                        plotting = make_plots, animation=make_animation)
     # print(f"Simulating the nominal case took {elapsedTime:.2f} seconds.")
     
     print("=" * 60)
     print("RUNNING ARCHITECTURE 1: NOMINAL MPC + LOCAL CBF")
     print("=" * 60)
-    dir_local, elapsedTime = single_run(params,"LocalCBF", base_out_dir=base_out_dir,noise = disturbances)
+    dir_local, elapsedTime = single_run(params,"LocalCBF", base_out_dir=base_out_dir,noise = disturbances,
+                                        plotting = make_plots, animation=make_animation)
     #print(f"Simulating the local CBF case took {elapsedTime:.2f} seconds.")
 
     print("\n" + "=" * 60)
     print("RUNNING ARCHITECTURE 2: REMOTE MPC-CBF + NOMINAL LOCAL")
     print("=" * 60)
-    dir_local, elapsedTime = single_run(params,"RemoteMPC-CBF", base_out_dir=base_out_dir,noise = disturbances)
+    dir_local, elapsedTime = single_run(params,"MPC-CBF", base_out_dir=base_out_dir,noise = disturbances,
+                                        plotting = make_plots, animation=make_animation)
     #print(f"Simulating the remote MPC-CBF case took {elapsedTime:.2f} seconds.")
 
     print("\n" + "=" * 60)
     print("RUNNING ARCHITECTURE 3: COMBINED SOFT REMOTE MPC-CBF + LOCAL CBF")
     print("=" * 60)
-    dir_local, elapsedTime = single_run(params,"Combined", base_out_dir=base_out_dir,noise = disturbances)
+    dir_local, elapsedTime = single_run(params,"Combined", base_out_dir=base_out_dir,noise = disturbances,
+                                        plotting = make_plots, animation=make_animation)
     #print(f"Simulating the combined case took {elapsedTime:.2f} seconds.")
 
     print(f"\nAll architectures generated under: {base_out_dir}")
-
-def run_specific_architecture(params: SystemParams, choice: Optional[int] = None, with_disturbances: bool = False):
+    if(make_summary_plots):
+        print("Creating a joint plot.")
+        plot_3dof_compare_results(
+            compare_root=base_out_dir,
+            params=params,
+            architectures=("Nominal", "LocalCBF", "MPC-CBF", "Combined"),
+            output_name="architecture_comparison_summary.png",
+            show_plot=False,
+        )
+def run_specific_architecture(params: SystemParams, choice: Optional[int] = None, with_disturbances: bool = False,
+                              make_plots: bool = True, make_animation: bool = False):
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     match choice:
@@ -513,14 +530,14 @@ def run_specific_architecture(params: SystemParams, choice: Optional[int] = None
         case 1:
             architecture_name = "LocalCBF"
         case 2:    
-            architecture_name =  "RemoteMPC-CBF"
+            architecture_name =  "MPC-CBF"
         case 3:
             architecture_name = "Combined"
         case _:
             print("No architecture was chosen. Simulating the nominal case.")
             choice = 0
             architecture_name = "Nominal"
-    base_out_dir = f"data/simulation_results_{architecture_name}_{timestamp}"
+    base_out_dir = f"data/single/{architecture_name}_{timestamp}"
     params.strategy_name = architecture_name
     
     #save params as meta data
@@ -544,88 +561,36 @@ def run_specific_architecture(params: SystemParams, choice: Optional[int] = None
                 print("=" * 60)
                 print("RUNNING ARCHITECTURE 0: NOMINAL MPC (No CBF)")
                 print("=" * 60)
-                dir_local, elapsedTime = single_run(params,"Nominal", base_out_dir=base_out_dir,noise = disturbances)
+                dir_local, elapsedTime = single_run(params,"Nominal", base_out_dir=base_out_dir,noise = disturbances,
+                                                    plotting = make_plots, animation=make_animation)
                 #print(f"Simulating the nominal case took {elapsedTime} seconds.")
             case 1:
                 print("=" * 60)
                 print("RUNNING ARCHITECTURE 1: NOMINAL MPC + LOCAL CBF")
                 print("=" * 60)
-                dir_local, elapsedTime = single_run(params,"LocalCBF", base_out_dir=base_out_dir,noise = disturbances)
+                dir_local, elapsedTime = single_run(params,"LocalCBF", base_out_dir=base_out_dir,noise = disturbances,
+                                                    plotting = make_plots, animation=make_animation)
                 #print(f"Simulating the local CBF case took {elapsedTime} seconds.")
             case 2:    
                 print("\n" + "=" * 60)
                 print("RUNNING ARCHITECTURE 2: REMOTE MPC-CBF + NOMINAL LOCAL")
                 print("=" * 60)
-                dir_local, elapsedTime, = single_run(params,"RemoteMPC-CBF", base_out_dir=base_out_dir,noise = disturbances)
+                dir_local, elapsedTime, = single_run(params,"MPC-CBF", base_out_dir=base_out_dir,noise = disturbances,
+                                                    plotting = make_plots, animation=make_animation)
                 #print(f"Simulating the remote MPC-CBF case took {elapsedTime} seconds.")
             case 3:
                 print("\n" + "=" * 60)
                 print("RUNNING ARCHITECTURE 3: COMBINED SOFT REMOTE-CBF + LOCAL CBF")
                 print("=" * 60)
-                dir_local, elapsedTime = single_run(params,"Combined", base_out_dir=base_out_dir,noise = disturbances)
+                dir_local, elapsedTime = single_run(params,"Combined", base_out_dir=base_out_dir,noise = disturbances,
+                                                    plotting = make_plots, animation=make_animation)
                 #print(f"Simulating the combined case took {elapsedTime} seconds.")
 
     print(f"\nData saved under: {base_out_dir}")
-
-
-def rerun_simulation(folder_path: str):
-    """To rerun a specific simulation
-    1. check for meta data & load
-    2. determine type of simulation
-    3. rerun
-
-    """
-    folder_path = os.path.normpath(folder_path)
-    
-    # Load meta data
-    meta_path = os.path.join(folder_path, "meta_data.json")
-
-    if not os.path.isfile(meta_path):
-        print(f"No meta_data.json found in: {folder_path}")
-        print("Cannot rerun because the original simulation settings are missing.")
-        return None
-    params_reader = SystemParams()
-    params = params_reader.read_meta_data(folder_path, rebuild_scenario=True)
-
-    #Load disturbances, if present
-    disturbance_file = os.path.join(folder_path, "disturbances")
-    disturbances = None
-    if os.path.exists(disturbance_file):
-        with_disturbances = True
-    
-    # determine simulation type
-    folder_name = os.path.basename(os.path.normpath(folder_path))
-    pattern = r"^simulation_results_(?P<sim_type>.+)_(?P<date>\d{8})_(?P<time>\d{6})$"
-    match = re.match(pattern, folder_name)
-
-    if match is None:
-        print("Could not determine the simulation type. Aborting")
-        return None
-    simtype = match.group("sim_type")
-    match simtype:
-        case 'Nominal'|'LocalCBF'|'RemoteMPC-CBF'|'Combined':
-            match simtype:
-                case 'Nominal':
-                    choice = 0
-                case 'LocalCBF':
-                    choice = 1
-                case 'RemoteMPC-CBF':    
-                    choice = 2
-                case 'Combined':
-                    choice = 3
-
-            run_specific_architecture(params,choice,with_disturbances)
-        case 'architecture_comparison':
-            run_all_architectures(params,with_disturbances)
-        case 'monte_carlo':  
-            #TODO - always run with disturbances!!!
-            print("Monte Carlo not yet implemented")
-        case _:
-            print(f"Could not figure out the simulation type: {simtype}")
-            print("Aborting")
-            return
         
-def run_monte_carlo(params: SystemParams, num_trials: int = 50, custom_out_dir=None, architectures: list = ["Nominal"],start_from_trial: int = 0, skip_baseline: bool =False):
+def run_monte_carlo(params: SystemParams, num_trials: int = 50, custom_out_dir=None, architectures: list = ["Nominal"],
+                    start_from_trial: int = 0, skip_baseline: bool =False, 
+                    make_plots: bool = False, make_animation: bool = False, make_summary_plots: bool = True):
     """
     Ececute iterative Montecarlo Trials
     Inputs:
@@ -635,14 +600,14 @@ def run_monte_carlo(params: SystemParams, num_trials: int = 50, custom_out_dir=N
         architectures: list of string containing the architectures to consider
     """
 
-    #define, if you want outputs from the simulation runs
+    #Set to True, if you want outputs from the simulation runs
     verbose = False
 
     t0 = time.time()
 
     # Create Folder for saving data
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_out_dir = custom_out_dir if custom_out_dir else f"data/monte_carlo_{timestamp}"
+    base_out_dir = custom_out_dir if custom_out_dir else f"data/monte_carlo/monte_carlo_{timestamp}"
     if(start_from_trial>0 and not os.path.isdir(base_out_dir)):
         print(f"Could not find {base_out_dir} to run the loop from trial {start_from_trial}.")
         print(f"Aborting")
@@ -671,7 +636,7 @@ def run_monte_carlo(params: SystemParams, num_trials: int = 50, custom_out_dir=N
     # Booleans for running the architectures
     RunMPCCBF = False
     elapsedTimeMPCCBF = 0
-    if any("RemoteMPC-CBF" in arch for arch in architectures):
+    if any("MPC-CBF" in arch for arch in architectures):
         RunMPCCBF = True
     # Booleans for running the architectures
     RunCombined = False
@@ -679,8 +644,8 @@ def run_monte_carlo(params: SystemParams, num_trials: int = 50, custom_out_dir=N
     if any("Combined" in arch for arch in architectures):
         RunCombined = True
 
-        #save params
-        params.save_meta_data(base_out_dir)
+    #save params
+    params.save_meta_data(base_out_dir)
 
     if (start_from_trial == 0 and not skip_baseline):
         # Run the baseline cases once (no disturbance)if(RunNominal):
@@ -693,20 +658,24 @@ def run_monte_carlo(params: SystemParams, num_trials: int = 50, custom_out_dir=N
         tStartBaseline = time.time()
 
         #always run the nominal baseline case
-        print("     Running Architecture 0: Nominal MPC + PD+ Local (no CBF)")
-        dir_local, elapsedTimeNominal = single_run(params,"Nominal", base_out_dir=baseline_out_dir,noise = None, verbose =verbose)
+        print("     Running Architecture 0: Nominal MPC (no CBF)")
+        dir_local, elapsedTimeNominal = single_run(params,"Nominal", base_out_dir=baseline_out_dir,noise = None, verbose =verbose,
+                                                    plotting = make_plots, animation=make_animation)
         
         if(RunLocalCBF):
             print("     Running Architecture 1: Nominal MPC + Local CBF")
-            dir_local, elapsedTimeLocalCBF = single_run(params,"LocalCBF", base_out_dir=baseline_out_dir,noise = None, verbose =verbose)
+            dir_local, elapsedTimeLocalCBF = single_run(params,"LocalCBF", base_out_dir=baseline_out_dir,noise = None, verbose =verbose,
+                                                    plotting = make_plots, animation=make_animation)
 
         if(RunMPCCBF):
-            print("     Running Architecture 2: Remote MPC-CBF + PD+ Local")
-            dir_local, elapsedTimeMPCCBF = single_run(params,"RemoteMPC-CBF", base_out_dir=baseline_out_dir,noise = None, verbose =verbose)
+            print("     Running Architecture 2: Remote MPC-CBF")
+            dir_local, elapsedTimeMPCCBF = single_run(params,"MPC-CBF", base_out_dir=baseline_out_dir,noise = None, verbose =verbose,
+                                                    plotting = make_plots, animation=make_animation)
 
         if(RunCombined):
             print("     Running Architecture 3: Combined MPC-CBF + Local CBF")
-            dir_local, elapsedTimeCombined = single_run(params,"Combined", base_out_dir=baseline_out_dir,noise = None, verbose =verbose)
+            dir_local, elapsedTimeCombined = single_run(params,"Combined", base_out_dir=baseline_out_dir,noise = None, verbose =verbose,
+                                                    plotting = make_plots, animation=make_animation)
         
         tRun = elapsedTimeNominal+elapsedTimeLocalCBF+elapsedTimeMPCCBF+elapsedTimeCombined
         tEstimated = 1.2*(num_trials)*np.average(tRun)
@@ -738,20 +707,23 @@ def run_monte_carlo(params: SystemParams, num_trials: int = 50, custom_out_dir=N
         
         if(RunNominal):
             print("     Running Architecture 0: Nominal MPC + PD+ Local (no CBF)")
-            dir_local, elapsedTimeNominal = single_run(params,"Nominal", base_out_dir=trial_out_dir,noise = disturbances, verbose =verbose, plotting = False)
+            dir_local, elapsedTimeNominal = single_run(params,"Nominal", base_out_dir=trial_out_dir,noise = disturbances, verbose =verbose,
+                                                    plotting = make_plots, animation=make_animation)
         
         if(RunLocalCBF):
             print("     Running Architecture 1: Nominal MPC + Local CBF")
-            dir_local, elapsedTimeLocalCBF = single_run(params,"LocalCBF", base_out_dir=trial_out_dir,noise = disturbances, verbose =verbose, plotting = False)
+            dir_local, elapsedTimeLocalCBF = single_run(params,"LocalCBF", base_out_dir=trial_out_dir,noise = disturbances, verbose =verbose,
+                                                    plotting = make_plots, animation=make_animation)
 
         if(RunMPCCBF):
             print("     Running Architecture 2: Remote MPC-CBF + PD+ Local")
-            dir_local, elapsedTimeMPCCBF = single_run(params,"RemoteMPC-CBF", base_out_dir=trial_out_dir,noise = disturbances, verbose =verbose, plotting = False)
+            dir_local, elapsedTimeMPCCBF = single_run(params,"MPC-CBF", base_out_dir=trial_out_dir,noise = disturbances, verbose =verbose,
+                                                    plotting = make_plots, animation=make_animation)
 
         if(RunCombined):
             print("     Running Architecture 3: Combined MPC-CBF + Local CBF")
-            dir_local, elapsedTimeCombined = single_run(params,"Combined", base_out_dir=trial_out_dir,noise = disturbances, verbose =verbose, plotting = False)
-
+            dir_local, elapsedTimeCombined = single_run(params,"Combined", base_out_dir=trial_out_dir,noise = disturbances, verbose =verbose,
+                                                    plotting = make_plots, animation=make_animation)
         tRun = elapsedTimeNominal+elapsedTimeLocalCBF+elapsedTimeMPCCBF+elapsedTimeCombined
         runTimings.append(tRun) 
         tEstimated = (num_trials-(trial_id+1))*np.average(runTimings)
@@ -761,15 +733,32 @@ def run_monte_carlo(params: SystemParams, num_trials: int = 50, custom_out_dir=N
     tTotal = time.time()-t0
     print(f"\nAll trials finished. Outputs saved to {base_out_dir}")
     print(f"The run took {str(datetime.timedelta(seconds=round(tTotal)))} h:min:s")
+
+    if(make_summary_plots):
+        print("Creating a workspace plot for the monte carlo run.")
+        legend_architectures = {"LocalCBF", "MPC-CBF", "Combined"}
+        legend_ncol = 1 + sum(arch in legend_architectures for arch in architectures)
+        plot_workspace(folder_path = base_out_dir, 
+                    output_folder=base_out_dir,
+                    architectures=architectures,
+                    show_plot=False, 
+                    xlim=(-0.05, 0.7),
+                    ylim=(-0.15, 0.45),
+                    square_limits=False,
+                    save_pdf=False,
+                    legend_ncol=legend_ncol)
     return summary,base_out_dir
     
 def run_disturbance_sweep(
     params,
     disturbance_bounds,
     num_trials: int = 10,
-    architectures=("LocalCBF", "RemoteMPC-CBF"),
+    architectures=("LocalCBF", "MPC-CBF"),
     custom_out_dir=None,
-    save_excel: bool = True,
+    save_excel: bool = True, 
+    make_plots: bool = False, 
+    make_animation: bool = False, 
+    make_summary_plots: bool = True
 ):
     """
     Run a Monte Carlo sweep over disturbance bounds.
@@ -782,7 +771,7 @@ def run_disturbance_sweep(
     """
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    sweep_out_dir = custom_out_dir or f"data/disturbance_sweep_{timestamp}"
+    sweep_out_dir = custom_out_dir or f"data/disturbance_sweep/disturbance_sweep_{timestamp}"
     os.makedirs(sweep_out_dir, exist_ok=True)
 
     print("=" * 60)
@@ -809,8 +798,7 @@ def run_disturbance_sweep(
 
         print("\n" + "=" * 60)
         print(f"RUNNING DISTURBANCE BOUND: {bound:.6f}")
-        print(f"torque_disturbance_bound = {params_bound.torque_disturbance_bound}")
-        print(f"process_noise_torque_disturbance_stdstd  = {params_bound.torque_disturbance_std}")
+        print(f"Standard Deviation = {params_bound.torque_disturbance_std}")
         print("=" * 60)
 
         # Save sweep-level params for this bound.
@@ -821,7 +809,11 @@ def run_disturbance_sweep(
             params=params_bound,
             num_trials=num_trials,
             custom_out_dir=bound_out_dir,
-            architectures=list(architectures),            
+            architectures=list(architectures),
+            skip_baseline=True,
+            make_plots =make_plots,
+            make_animation=make_animation,
+            make_summary_plots= False            
         )
         summary["disturbance_bound"] = bound
         summary["torque_disturbance_bound"] = params_bound.torque_disturbance_bound
@@ -838,6 +830,16 @@ def run_disturbance_sweep(
     print(f"Output: {sweep_out_dir}")
     print("=" * 60)
 
+    if make_summary_plots:
+        print("Making a plot of min clearance vs disturbance")
+        plot_min_clearance_over_disturbance(
+            sweep_folder_path=sweep_out_dir,
+            architectures=architectures,
+            obstacle_index=1, #0: obstacle 1, 1: obstacle 2
+            include_safety_margin=False,
+            output_name="min_clearance_over_disturbance",
+            save_pdf=False
+        )
     # Aggregate across all bounds.
     sweep_summary = analyse_disturbance_sweep(
         sweep_out_dir=sweep_out_dir,
@@ -850,16 +852,19 @@ def run_delay_sweep(
     params,
     delays = range(1,11),
     num_trials: int = 10,
-    architectures=("LocalCBF", "RemoteMPC-CBF"),
+    architectures=("LocalCBF", "MPC-CBF"),
     custom_out_dir=None,
     save_excel: bool = True,
+    make_plots: bool = False, 
+    make_animation: bool = False, 
+    make_summary_plots: bool = True
 ):
     """
     Run a sweep over delays.
     """
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    sweep_out_dir = custom_out_dir or f"data/delay_sweep_{timestamp}"
+    sweep_out_dir = custom_out_dir or f"data/delay_sweep/delay_sweep_{timestamp}"
     os.makedirs(sweep_out_dir, exist_ok=True)
 
     print("=" * 60)
@@ -896,7 +901,10 @@ def run_delay_sweep(
             num_trials=num_trials,
             custom_out_dir=delay_out_dir,
             architectures=list(architectures),  
-            skip_baseline=True         
+            skip_baseline=True,
+            make_plots=make_plots,
+            make_animation=make_animation,
+            make_summary_plots= False       
         )
         
         summary["delay"] = delay
@@ -912,6 +920,25 @@ def run_delay_sweep(
     print(f"Output: {sweep_out_dir}")
     print("=" * 60)
 
+    # Summary plot
+    if(make_summary_plots):
+        plot_min_clearance_over_delay(
+            sweep_folder_path=sweep_out_dir,
+            output_folder=sweep_out_dir,
+            output_name="min_clearance_over_known_delay",
+            architectures=architectures,
+            obstacle_index=1,                 # obstacle 2:idx 1, obstacle 1: idx 0
+            include_safety_margin=False,      # zero = physical collision boundary
+            figsize=(3.5, 1.8),               # IEEE single-column-ish
+            xlim=(0.5, 10.5),
+            #ylim=(-0.02, 0.12),
+            save_pdf=False,
+            save_png=True,
+            save_csv= False,
+            dpi=800,
+            show_plot=False,
+        )
+
     # Aggregate across all bounds.
     sweep_summary = analyse_delay_sweep(
         sweep_out_dir=sweep_out_dir,
@@ -919,99 +946,4 @@ def run_delay_sweep(
     )
 
     return sweep_out_dir, sweep_summary
-
-
-
-
-if __name__ == "__main__":
-    
-    params = SystemParams()
-
-
-    #rerun_simulation("data/simulation_results_architecture_comparison_20260527_105320")
-    #run_specific_architecture(params,choice=1,with_disturbances=True)
-    #run_all_architectures(params,with_disturbances=False)
-    
-    #arch_for_MC = ["LocalCBF","RemoteMPC-CBF","Combined"]
-    #_, folder_path = run_monte_carlo(params=params, num_trials=50, start_from_trial = 26,custom_out_dir="data/monte_carlo_20260529_055607", architectures=arch_for_MC,)
-
-    """ folder_path ="data/monte_carlo_20260528_200300_tau=5+1"
-    plot_workspace(folder_path = folder_path, 
-                   output_folder="plots",
-                   show_plot=False, 
-                    xlim=(-0.05, 0.7),
-                    ylim=(-0.15, 0.45),
-                    square_limits=False,) """
-
-    """ plot_workspace_comparison(
-        folder_paths=(
-            r"data/monte_carlo_20260528_233516_tau=3+0",
-            r"data/monte_carlo_20260528_200300_tau=5+1",
-        ),
-        panel_titles=(
-            r"$\tau=3$, $r_\tau=0$",
-            r"$\tau=5$, $r_\tau=1$",
-        ),
-        output_folder=r"plots",
-        output_name="statespace_comparison",
-        xlim=(-0.05, 0.7),
-        ylim=(-0.15, 0.45),
-        figsize=(7, 4),   # inches - IEEE column
-        save_pdf=True,
-        save_png=True,
-        dpi=800,
-        show_plot=False, 
-    ) """
-
-    """ plot_min_distance_to_obstacle(
-        folder_path=r"data/monte_carlo_20260528_200300_tau=5+1",
-        output_folder=r"plots",
-        output_name="min_distance_obstacle",
-        figsize=(3.5, 1.5),
-        xlim=(0.0, 18.0),
-        #ylim=(-0.02, 0.28),
-        legend_ncol=4,
-        legend_loc="upper right",
-        show_plot=False,
-    )  """
-
-    """ plot_min_clearance_over_delay(
-        sweep_folder_path=r"data/delay_sweep_20260529_110404",
-        output_folder=r"plots",
-        output_name="min_clearance_over_known_delay",
-        architectures=("LocalCBF", "RemoteMPC-CBF", "Combined"),
-        obstacle_index=1,                 # obstacle 2
-        include_safety_margin=True,      # zero = physical collision boundary
-        figsize=(3.5, 1.8),               # IEEE single-column-ish
-        xlim=(0.5, 10.5),
-        #ylim=(-0.02, 0.12),
-        save_pdf=True,
-        save_png=True,
-        save_csv= False,
-        dpi=800,
-        show_plot=False,
-    ) """
-
-    #analyse_monte_carlo_run(folder_path, save_excel=True)
-
-    #folder = r"data/monte_carlo_20260528_092504"
-    #analyse_monte_carlo_run(folder, save_excel=True)
-    #disturbance_bounds = [0.005, 0.01, 0.02, 0.03, 0.04, 0.05]
-
-   # sweep_dir, sweep_summary = run_disturbance_sweep(
-   #     params=params,
-   #     disturbance_bounds=disturbance_bounds,
-   #     num_trials=5,
-   #     architectures=["LocalCBF", "RemoteMPC-CBF"],
-   #     custom_out_dir=None,
-   #     save_excel=True,
-   # )
-    """ sweep_dir, sweep_summary = run_delay_sweep(
-        params=params,
-        delays = range(0,11),
-        num_trials= 10,
-        architectures=("LocalCBF", "RemoteMPC-CBF","Combined"),
-        custom_out_dir=None,
-        save_excel= True,
-    ) """
 

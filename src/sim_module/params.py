@@ -55,9 +55,8 @@ class SystemParams:
     )
     # default_factory=lambda: [(0.18, -0.12), (0.29, 0.23), (0.7, 0.4)]
     # larger noise case: [(0.18, -0.12), (0.26, 0.19), (0.77, 0.39)]
-    waypoint_tolerance: float = 0.035  # Slightly relaxed for faster convergence with noise
     use_reference_trajectory: bool = False  # If True, use the provided pr/dpr arrays directly instead of waypoint switching.
-    target_tol = 0.02 #tolerance for having tracked a point quickly
+    target_tol = 0.005 #tolerance for having tracked a point quickly
     target_enter_tol: float =0.05 #tolerance for starting the "tracking timer"
     target_hold_tol: float =0.07 # tolerance for staying close to a target -> tracking timer continues
     target_velocity_tol: float = 0.1 #velocity l
@@ -167,12 +166,10 @@ class SystemParams:
     predictor_integration_method: str = "rk4"  # Integration method: "euler" or "rk4"
     
     
-    # ==================== Discretization Method ====================
-    discretization_method: str = "exact"  # "euler" or "exact"
-    # euler: Forward Euler discretization x[k+1] = x[k] + dt*f(x[k], u[k])
-    #        A_d = exp(A_c * dt), B_d = ∫ exp(A_c*σ)dσ * B_c
-    #        Provides zero discretization error for linear systems
-    # Process noise: added to control input in dynamics equation (unknown to controller)
+    # ==================== Sweep Variables ====================
+    disturbance_sweep_values = [0.005, 0.01, 0.02, 0.03]
+    delay_sweep_values = [1,3,5,7,10]
+    
     # 
     # ==================== Process Noise ====================
     # Model: x_{k+1} = f(x_k, u_k) +g(x_k, u_k) + [0; w] where w affects only velocity

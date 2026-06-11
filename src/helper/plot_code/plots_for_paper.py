@@ -8,9 +8,8 @@ import numpy as np
 import pandas as pd
 import re
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Patch, Polygon as MplPolygon
+from matplotlib.patches import Circle
 from matplotlib.lines import Line2D
-from scipy.spatial import ConvexHull
 
 
 # ============================================================
@@ -51,6 +50,35 @@ def _load_meta_data(root: Path) -> Dict[str, Any]:
 
     return meta["params"]
 
+def _load_joint_trajectory(csv_path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Load time and real joint trajectory from a *_data.csv file.
+
+    Returns
+    -------
+    t:
+        shape (n_steps,)
+
+    q:
+        shape (n_steps, 3)
+    """
+    df = pd.read_csv(csv_path)
+
+    required_cols = ["time", "theta1_real", "theta2_real", "theta3_real"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise ValueError(f"Column '{col}' missing in {csv_path}")
+
+    t = df["time"].to_numpy(dtype=float)
+
+    q = df[["theta1_real", "theta2_real", "theta3_real"]].apply(
+        pd.to_numeric,
+        errors="coerce",
+    ).to_numpy(dtype=float)
+
+    valid = np.isfinite(t) & np.all(np.isfinite(q), axis=1)
+
+    return t[valid], q[valid]
 
 def _load_ee_path(csv_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -70,6 +98,150 @@ def _load_ee_path(csv_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     valid = np.isfinite(t) & np.isfinite(x) & np.isfinite(y)
     return t[valid], x[valid], y[valid]
 
+def _get_link_lengths_from_params(params: Dict[str, Any]) -> Tuple[float, float, float]:
+    """
+    Extract 3-DOF link lengths from metadata.
+
+    Adjust the key names here if your meta_data.json stores them differently.
+    """
+    candidate_keys = [
+        "link_lengths",
+        "robot_link_lengths",
+        "link_lengths3",
+    ]
+
+    for key in candidate_keys:
+        if key in params:
+            vals = params[key]
+            if len(vals) == 3:
+                return float(vals[0]), float(vals[1]), float(vals[2])
+
+    # Optional fallback if stored as individual scalars.
+    scalar_keys = ["L1", "L2", "L3"]
+    if all(k in params for k in scalar_keys):
+        return float(params["L1"]), float(params["L2"]), float(params["L3"])
+
+    scalar_keys = ["l1", "l2", "l3"]
+    if all(k in params for k in scalar_keys):
+        return float(params["l1"]), float(params["l2"]), float(params["l3"])
+
+    raise KeyError(
+        "Could not find link lengths in meta_data.json. "
+        "Expected one of: link_lengths, robot_link_lengths, link_lengths3, "
+        "or scalar keys L1/L2/L3."
+    )
+
+def _monitored_robot_points_from_q(
+    q: np.ndarray,
+    link_lengths: Tuple[float, float, float],
+    cbf_link_samples: int = 3,
+    include_base: bool = False,
+) -> list[np.ndarray]:
+    """
+    Reconstruct monitored robot points from joint configuration.
+
+    This should match the safety post-processing convention:
+        base, p1, p2, ee
+    plus intermediate points on each link.
+
+    Parameters
+    ----------
+    q:
+        Joint configuration, shape (3,).
+
+    link_lengths:
+        Tuple (L1, L2, L3).
+
+    cbf_link_samples:
+        Number controlling intermediate samples.
+
+    include_base:
+        If True, include fixed base. For obstacle-clearance plots, including the
+        base is conservative but can be misleading if obstacles are never near it.
+    """
+    q = np.asarray(q, dtype=float).reshape(3)
+    q1, q2, q3 = q
+
+    L1, L2, L3 = link_lengths
+
+    base = np.array([0.0, 0.0], dtype=float)
+
+    p1 = base + np.array([
+        L1 * np.cos(q1),
+        L1 * np.sin(q1),
+    ])
+
+    p2 = p1 + np.array([
+        L2 * np.cos(q1 + q2),
+        L2 * np.sin(q1 + q2),
+    ])
+
+    ee = p2 + np.array([
+        L3 * np.cos(q1 + q2 + q3),
+        L3 * np.sin(q1 + q2 + q3),
+    ])
+
+    points = []
+
+    if include_base:
+        points.append(base)
+
+    # Joint/end points.
+    points.extend([p1, p2, ee])
+
+    # Intermediate points on links.
+    n_samp = int(cbf_link_samples)
+    grid = np.linspace(0.0, 1.0, n_samp + 1)[1:-1]
+
+    for s in grid:
+        points.append(base + s * (p1 - base))
+        points.append(p1 + s * (p2 - p1))
+        points.append(p2 + s * (ee - p2))
+
+    return points
+
+def _compute_robot_clearance_to_obstacle(
+    q_traj: np.ndarray,
+    obstacle_center: np.ndarray,
+    obstacle_radius: float,
+    link_lengths: Tuple[float, float, float],
+    cbf_link_samples: int = 3,
+    include_base: bool = True,
+) -> np.ndarray:
+    """
+    Compute signed physical clearance from the monitored robot body to one obstacle.
+
+    For each time step:
+        d(k) = min_j ||p_j(q_k) - O|| - r
+
+    Positive means outside the physical obstacle.
+    Zero means touching the physical boundary.
+    Negative means collision.
+    """
+    obstacle_center = np.asarray(obstacle_center, dtype=float).reshape(2)
+    q_traj = np.asarray(q_traj, dtype=float)
+
+    clearances = np.full(q_traj.shape[0], np.nan, dtype=float)
+
+    for k, q in enumerate(q_traj):
+        if not np.all(np.isfinite(q)):
+            continue
+
+        points = _monitored_robot_points_from_q(
+            q=q,
+            link_lengths=link_lengths,
+            cbf_link_samples=cbf_link_samples,
+            include_base=include_base,
+        )
+
+        point_clearances = [
+            float(np.linalg.norm(np.asarray(p) - obstacle_center) - obstacle_radius)
+            for p in points
+        ]
+
+        clearances[k] = float(np.min(point_clearances))
+
+    return clearances
 
 def _find_single_csv(folder: Path) -> Path:
     csvs = sorted(folder.glob("*_data.csv"))
@@ -92,7 +264,7 @@ def _load_architecture_trial_paths(
     architecture: str,
 ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
-    Load all trial paths for one architecture, e.g. 'LocalCBF' or 'RemoteMPC-CBF'.
+    Load all trial paths for one architecture, e.g. 'LocalCBF' or 'MPC-CBF'.
     """
     trial_dirs = sorted([p for p in root.glob("trial_*") if p.is_dir()])
     if len(trial_dirs) == 0:
@@ -366,287 +538,6 @@ def _resample_paths_by_arclength(
     return np.stack(xy_runs, axis=0)
 
 # ============================================================
-# Main plot function
-# ============================================================
-
-def plot_workspace(
-    folder_path: str | Path,
-    output_name: str = "statespace_plot",
-    architectures: Tuple[str, str] = ("LocalCBF", "RemoteMPC-CBF"),
-    save_pdf: bool = True,
-    save_png: bool = True,
-    save_svg: bool = False,
-    dpi: int = 600,
-    figsize: Tuple[float, float] = (4.0, 4.0),
-    envelope_fill_alpha: float = 0.18,
-    xlim: Tuple[float, float] | None = None,
-    ylim: Tuple[float, float] | None = None,
-    square_limits: bool = True,
-    axis_fontsize: float = 12,
-    tick_fontsize: float = 10,
-    legend_fontsize: float = 10,
-    waypoint_fontsize: float = 10,
-    obstacle_label_fontsize: float = 10,
-    title_fontsize: float = 12,
-    show_title: bool = False,
-    title: str | None = None,
-    show_plot: bool = False,
-    envelope_n_bins: int = 350,
-    mean_n_points: int = 500,
-):
-    """
-    Create a paper-style state-space plot:
-      - obstacles + waypoints
-      - nominal baseline as thin black line
-      - envelope of all MC runs for each architecture
-      - mean path for each architecture
-
-    Expected structure in folder_path:
-      meta_data.json
-      Baseline/Nominal/*_data.csv
-      trial_*/LocalCBF/*_data.csv
-      trial_*/RemoteMPC-CBF/*_data.csv
-    """
-
-    root = Path(folder_path)
-    if not root.exists():
-        raise FileNotFoundError(f"Folder not found: {root}")
-
-    # ---------------------------
-    # Adjustable style dictionary
-    # ---------------------------
-    style = _get_workspace_style()
-
-    # ---------------------------
-    # Read metadata / scene
-    # ---------------------------
-    params = _load_meta_data(root)
-
-    scenario_name = params.get("scenario_name", "Scenario")
-    waypoints = params.get("waypoints", [])
-    obstacle_centers = params.get("scenario_obstacle_centers", [])
-    obstacle_radii = params.get("obstacle_default_radius", [])
-
-    if len(waypoints) == 0:
-        raise ValueError("No waypoints found in meta_data.json")
-    if len(obstacle_centers) != len(obstacle_radii):
-        raise ValueError("Obstacle centers and radii have inconsistent lengths")
-
-    waypoints = [tuple(w) for w in waypoints]
-    obstacle_centers = [tuple(c) for c in obstacle_centers]
-    obstacle_radii = list(obstacle_radii)
-
-    # ---------------------------
-    # Read baseline nominal path
-    # ---------------------------
-    t_base, x_base, y_base = _load_baseline_nominal(root)
-
-    # ---------------------------
-    # Read MC paths + compute means / envelopes
-    # ---------------------------
-    arch_results = {}
-
-    for arch in architectures:
-        paths = _load_architecture_trial_paths(root, arch)
-        xy_runs_space = _resample_paths_by_arclength(
-            paths,
-            n_points=mean_n_points,
-        )
-
-        mean_xy = _compute_mean_path(xy_runs_space)
-
-        xy_runs_env = _pad_paths_to_equal_length(paths)
-        x_env, y_env_min, y_env_max = _compute_xwise_envelope(
-            xy_runs_env,
-            n_bins=envelope_n_bins,
-        )
-
-        arch_results[arch] = {
-            "paths": paths,
-            "xy_runs": xy_runs_space,
-            "mean_xy": mean_xy,
-            "x_env": x_env,
-            "y_env_min": y_env_min,
-            "y_env_max": y_env_max,
-        }
-
-        print(f"{arch}: {len(paths)} runs loaded.")
-
-    # ---------------------------
-    # Build plot
-    # ---------------------------
-    fig, ax = plt.subplots(figsize=figsize)
-
-    # Obstacles
-
-    for i, (center, radius) in enumerate(zip(obstacle_centers, obstacle_radii)):
-        circle = Circle(
-            center,
-            radius,
-            facecolor=style["obstacle_facecolor"],
-            edgecolor=style["obstacle_edgecolor"],
-            linewidth=1.5,
-            alpha=style["obstacle_alpha"],
-            zorder=0,
-        )
-        ax.add_patch(circle)
-
-        ax.text(
-            center[0],
-            center[1],
-            rf"$\mathcal{{O}}_{i+1}$",
-            ha="center",
-            va="center",
-            fontsize=obstacle_label_fontsize,
-            color=style.get("obstacle_text_color", "#7A0000"),
-            zorder=1,
-        )
-    
-    # Waypoints
-    wp_x = [w[0] for w in waypoints]
-    wp_y = [w[1] for w in waypoints]
-    ax.scatter(
-        wp_x,
-        wp_y,
-        s=style["waypoint_size"],
-        c=style["waypoint_color"],
-        marker=style["waypoint_marker"],
-        zorder=5,
-    )
-
-    for i, (wx, wy) in enumerate(waypoints):
-        ax.text(
-            wx,
-            wy + 0.018,
-            rf"WP$_{i}$",
-            fontsize=waypoint_fontsize,
-            ha="center",
-            va="bottom",
-            color="black",
-            zorder=6,
-        )
-
-    # Baseline
-    ax.plot(
-        x_base,
-        y_base,
-        color=style["baseline_color"],
-        linestyle=style["baseline_linestyle"],
-        linewidth=style["baseline_linewidth"],
-        zorder=2,
-    )
-    # Envelopes + mean lines
-    for arch in architectures:
-        arch_style = style["arch_styles"][arch]
-        mean_xy = arch_results[arch]["mean_xy"]
-
-        _plot_xwise_envelope(
-            ax,
-            arch_results[arch]["x_env"],
-            arch_results[arch]["y_env_min"],
-            arch_results[arch]["y_env_max"],
-            color=arch_style["color"],
-            alpha_fill=envelope_fill_alpha,
-            zorder=1,
-        )
-        #plot means
-        ax.plot(
-            mean_xy[:, 0],
-            mean_xy[:, 1],
-            color=arch_style["color"],
-            linestyle=arch_style["linestyle"],
-            linewidth=arch_style["linewidth"],
-            zorder=4,
-        )
-
-    # Labels
-    ax.set_xlabel(r"$x$ (m)", fontsize=axis_fontsize)
-    ax.set_ylabel(r"$y$ (m)", fontsize=axis_fontsize)
-    ax.tick_params(axis="both", labelsize=tick_fontsize)
-
-
-
-    if show_title:
-        if title is None:
-            title = f"{scenario_name}: Mean path and Monte Carlo envelope"
-        ax.set_title(title, fontsize=title_fontsize)
-
-    # Limits
-    if xlim is not None:
-        ax.set_xlim(*xlim)
-    if ylim is not None:
-        ax.set_ylim(*ylim)
-
-    if xlim is None or ylim is None:
-        # Collect all geometry for automatic limits
-        xs = list(x_base) + wp_x
-        ys = list(y_base) + wp_y
-
-        for center, radius in zip(obstacle_centers, obstacle_radii):
-            xs.extend([center[0] - radius, center[0] + radius])
-            ys.extend([center[1] - radius, center[1] + radius])
-
-        for arch in architectures:
-            mean_xy = arch_results[arch]["mean_xy"]
-            xs.extend(mean_xy[:, 0].tolist())
-            ys.extend(mean_xy[:, 1].tolist())
-
-            xy_runs = arch_results[arch]["xy_runs"].reshape(-1, 2)
-            xs.extend(xy_runs[:, 0].tolist())
-            ys.extend(xy_runs[:, 1].tolist())
-
-        if square_limits:
-            _set_square_limits(ax, np.asarray(xs), np.asarray(ys), pad_frac=0.06)
-
-    ax.grid(True, alpha=0.3)
-
-    # Legend
-    legend_handles = [
-    Line2D([0], [0], color="black", linewidth=1.2, linestyle="-", label="Nominal"),
-    Line2D([0], [0], color=style["arch_styles"]["LocalCBF"]["color"],
-           linewidth=2.2, linestyle="-", label="Local CBF"),
-    Line2D([0], [0], color=style["arch_styles"]["RemoteMPC-CBF"]["color"],
-           linewidth=2.2, linestyle="--", label="Remote MPC-CBF"),
-    ]
-
-    _add_top_legend_and_adjust(
-        fig,
-        ax,
-        legend_handles,
-        fontsize=legend_fontsize,
-        ncol=3,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.98),
-        frameon=True,
-        pad=0.015,
-    )
-
-    # ---------------------------
-    # Save figure
-    # ---------------------------
-    out_base = root / output_name
-
-    if save_pdf:
-        fig.savefig(out_base.with_suffix(".pdf"), bbox_inches="tight")
-    if save_svg:
-        fig.savefig(out_base.with_suffix(".svg"), bbox_inches="tight")
-    if save_png:
-        fig.savefig(out_base.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
-
-    print(f"Saved plot to:")
-    if save_pdf:
-        print(f"  {out_base.with_suffix('.pdf')}")
-    if save_svg:
-        print(f"  {out_base.with_suffix('.svg')}")
-    if save_png:
-        print(f"  {out_base.with_suffix('.png')}")
-
-
-    if show_plot:
-        plt.show(block=True)
-    return fig, ax
-
-# ============================================================
 # Extended plotting API: single-axis, single-figure, and double-figure plots
 # ============================================================
 
@@ -665,17 +556,29 @@ def _get_workspace_style() -> Dict[str, Any]:
         "baseline_linewidth": 1.1,
         # Okabe-Ito colorblind-safe palette
         "arch_styles": {
+            "Nominal": {
+                "label": "Nominal",
+                "color": "black",
+                "linestyle": "-",
+                "linewidth": 1.3,
+            },
             "LocalCBF": {
                 "label": "Local CBF",
                 "color": "#0072B2",   # blue
                 "linestyle": "-",
-                "linewidth": 1.7,
+                "linewidth": 1.5,
             },
-            "RemoteMPC-CBF": {
+            "MPC-CBF": {
                 "label": "Remote MPC-CBF",
                 "color": "#E69F00",   # orange
                 "linestyle": "--",
-                "linewidth": 1.7,
+                "linewidth": 1.5,
+            },
+            "Combined": {
+                "label": "Combined",
+                "color": "#009E73",
+                "linestyle": "-.",
+                "linewidth": 1.5,
             },
         },
     }
@@ -700,10 +603,17 @@ def _workspace_legend_handles(style: Dict[str, Any]) -> List[Line2D]:
         ),
         Line2D(
             [0], [0],
-            color=style["arch_styles"]["RemoteMPC-CBF"]["color"],
+            color=style["arch_styles"]["MPC-CBF"]["color"],
             linewidth=2.2,
-            linestyle=style["arch_styles"]["RemoteMPC-CBF"]["linestyle"],
+            linestyle=style["arch_styles"]["MPC-CBF"]["linestyle"],
             label="Remote MPC-CBF",
+        ),
+        Line2D(
+            [0], [0],
+            color=style["arch_styles"]["Combined"]["color"],
+            linewidth=2.2,
+            linestyle=style["arch_styles"]["Combined"]["linestyle"],
+            label="Combined",
         ),
     ]
 
@@ -711,7 +621,7 @@ def _workspace_legend_handles(style: Dict[str, Any]) -> List[Line2D]:
 def plot_workspace_on_axis(
     ax,
     folder_path: str | Path,
-    architectures: Tuple[str, str] = ("LocalCBF", "RemoteMPC-CBF"),
+    architectures: Tuple[str, str] = ("LocalCBF", "MPC-CBF"),
     envelope_fill_alpha: float = 0.18,
     xlim: Tuple[float, float] | None = None,
     ylim: Tuple[float, float] | None = None,
@@ -907,12 +817,15 @@ def plot_workspace_on_axis(
     return style
 
 
-# This definition intentionally overrides the earlier plot_workspace definition.
+# ============================================================
+# Main plot function
+# ============================================================
+
 def plot_workspace(
     folder_path: str | Path,
     output_name: str = "statespace_plot",
     output_folder: str | Path | None = None,
-    architectures: Tuple[str, str] = ("LocalCBF", "RemoteMPC-CBF"),
+    architectures: Tuple[str, str] = ("LocalCBF", "MPC-CBF"),
     save_pdf: bool = True,
     save_png: bool = True,
     save_svg: bool = False,
@@ -967,7 +880,7 @@ def plot_workspace(
     _add_top_legend_and_adjust(
         fig,
         ax,
-        legend_handles,
+        legend_handles[:legend_ncol],
         fontsize=legend_fontsize,
         ncol=legend_ncol,
         loc="upper center",
@@ -1008,7 +921,7 @@ def plot_workspace_comparison(
     panel_titles: Tuple[str, str] = ("Low disturbance", "High disturbance"),
     output_name: str = "statespace_comparison",
     output_folder: str | Path | None = None,
-    architectures: Tuple[str, str] = ("LocalCBF", "RemoteMPC-CBF"),
+    architectures: Tuple[str, str] = ("LocalCBF", "MPC-CBF"),
     save_pdf: bool = True,
     save_png: bool = True,
     save_svg: bool = False,
@@ -1316,7 +1229,7 @@ def _get_distance_plot_style() -> Dict[str, Any]:
                 "linestyle": "-",
                 "linewidth": 1.3,
             },
-            "RemoteMPC-CBF": {
+            "MPC-CBF": {
                 "label": "MPC-CBF",
                 "color": "#E69F00",
                 "linestyle": "--",
@@ -1342,7 +1255,7 @@ def plot_min_distance_to_obstacle(
     folder_path: str | Path,
     output_name: str = "min_distance_to_obstacle",
     output_folder: str | Path | None = None,
-    architectures: Tuple[str, ...] = ("LocalCBF", "RemoteMPC-CBF", "Combined"),
+    architectures: Tuple[str, ...] = ("LocalCBF", "MPC-CBF", "Combined"),
     obstacle_index: int = 1,
     include_safety_margin: bool = False,
     save_pdf: bool = True,
@@ -1620,48 +1533,70 @@ def _find_delay_case_dirs(sweep_root: Path) -> List[Path]:
     return case_dirs
 
 
-def _load_trial_min_clearances_for_delay_case(
-    delay_dir: Path,
+def _load_trial_min_clearances_for_case(
+    case_dir: Path,
     architecture: str,
     obstacle_center: np.ndarray,
     obstacle_radius: float,
-) -> np.ndarray:
+    link_lengths: Tuple[float, float, float],
+    cbf_link_samples: int = 3,
+    include_base: bool = True,
+    ) -> np.ndarray:
     """
     For one delay folder and one architecture, compute one scalar per trial:
 
-        min_k ||p_ee(k) - O|| - r
+        d_min_trial = min over time and monitored robot points
+                      ||p_j(q_k) - O|| - r
+
+    This is the minimum true signed distance to the physical obstacle boundary.
+    It does not include the CBF safety margin unless the caller already passed
+    an inflated obstacle_radius.
 
     Returns
     -------
     trial_mins:
         Array of shape (n_trials,).
     """
-    try:
-        paths = _load_architecture_trial_paths(delay_dir, architecture)
-    except FileNotFoundError:
+    trial_dirs = sorted([p for p in case_dir.glob("trial_*") if p.is_dir()])
+
+    if len(trial_dirs) == 0:
         return np.asarray([], dtype=float)
 
     trial_mins = []
 
-    for _, x, y in paths:
-        clearance = _compute_ee_clearance_to_obstacle(
-            x=x,
-            y=y,
-            obstacle_center=obstacle_center,
-            obstacle_radius=obstacle_radius,
-        )
-
-        if clearance.size == 0 or not np.any(np.isfinite(clearance)):
+    for trial_dir in trial_dirs:
+        arch_dir = trial_dir / architecture
+        if not arch_dir.exists():
             continue
 
-        trial_mins.append(float(np.nanmin(clearance)))
+        try:
+            csv_path = _find_single_csv(arch_dir)
+            _, q_traj = _load_joint_trajectory(csv_path)
+
+            clearance = _compute_robot_clearance_to_obstacle(
+                q_traj=q_traj,
+                obstacle_center=obstacle_center,
+                obstacle_radius=obstacle_radius,
+                link_lengths=link_lengths,
+                cbf_link_samples=cbf_link_samples,
+                include_base=include_base,
+            )
+
+            if clearance.size == 0 or not np.any(np.isfinite(clearance)):
+                continue
+
+            trial_mins.append(float(np.nanmin(clearance)))
+
+        except Exception as exc:
+            print(f"Skipping {trial_dir.name} / {architecture}: {exc}")
+            continue
 
     return np.asarray(trial_mins, dtype=float)
 
 
 def collect_delay_sweep_min_clearance_statistics(
     sweep_folder_path: str | Path,
-    architectures: Tuple[str, ...] = ("LocalCBF", "RemoteMPC-CBF", "Combined"),
+    architectures: Tuple[str, ...] = ("LocalCBF", "MPC-CBF", "Combined"),
     obstacle_index: int = 1,
     include_safety_margin: bool = False,
 ) -> pd.DataFrame:
@@ -1699,6 +1634,8 @@ def collect_delay_sweep_min_clearance_statistics(
 
         try:
             params = _load_meta_data(delay_dir)
+            link_lengths = _get_link_lengths_from_params(params)
+            cbf_link_samples = int(params.get("cbf_link_samples", 3))
             obstacle_center, obstacle_radius = _get_obstacle_center_and_radius(
                 params=params,
                 obstacle_index=obstacle_index,
@@ -1709,12 +1646,15 @@ def collect_delay_sweep_min_clearance_statistics(
             continue
 
         for arch in architectures:
-            trial_mins = _load_trial_min_clearances_for_delay_case(
-                delay_dir=delay_dir,
+            trial_mins = _load_trial_min_clearances_for_case(
+                case_dir=delay_dir,
                 architecture=arch,
                 obstacle_center=obstacle_center,
                 obstacle_radius=obstacle_radius,
-            )
+                link_lengths=link_lengths,
+                cbf_link_samples=cbf_link_samples,
+                include_base=False,
+                )       
 
             if trial_mins.size == 0:
                 print(f"Skipping {delay_dir.name} / {arch}: no valid trials found.")
@@ -1748,7 +1688,7 @@ def collect_delay_sweep_min_clearance_statistics(
     architecture_order = {
         "Nominal": 0,
         "LocalCBF": 1,
-        "RemoteMPC-CBF": 2,
+        "MPC-CBF": 2,
         "Combined": 3,
     }
 
@@ -1767,7 +1707,7 @@ def plot_min_clearance_over_delay(
     sweep_folder_path: str | Path,
     output_name: str = "min_clearance_over_delay",
     output_folder: str | Path | None = None,
-    architectures: Tuple[str, ...] = ("LocalCBF", "RemoteMPC-CBF", "Combined"),
+    architectures: Tuple[str, ...] = ("LocalCBF", "MPC-CBF", "Combined"),
     obstacle_index: int = 1,
     include_safety_margin: bool = False,
     save_pdf: bool = True,
@@ -1938,6 +1878,411 @@ def plot_min_clearance_over_delay(
         fig.savefig(out_base.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
 
     print("Saved delay-clearance plot to:")
+    if save_pdf:
+        print(f"  {out_base.with_suffix('.pdf')}")
+    if save_svg:
+        print(f"  {out_base.with_suffix('.svg')}")
+    if save_png:
+        print(f"  {out_base.with_suffix('.png')}")
+
+    if show_plot:
+        plt.show(block=True)
+    else:
+        plt.close(fig)
+
+    return fig, ax, stats
+
+
+# ============================================================
+# Disturbance sweep plot: minimum signed clearance over disturbance bound
+# ============================================================
+
+def _parse_disturbance_value_from_folder_name(folder_name: str) -> float:
+    """
+    Parse disturbance value from folder names such as:
+        bound_0p00000
+        disturbance_0p01000
+        disturbance=0p01000
+        w_0p01000
+        wmax_0p01000
+
+    Returns np.nan if parsing fails.
+    """
+    patterns = [
+        r"bound_([0-9]+(?:p[0-9]+)?)",
+        r"disturbance_([0-9]+(?:p[0-9]+)?)",
+        r"disturbance=([0-9]+(?:p[0-9]+)?)",
+        r"w_([0-9]+(?:p[0-9]+)?)",
+        r"wmax_([0-9]+(?:p[0-9]+)?)",
+        r"noise_([0-9]+(?:p[0-9]+)?)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, folder_name)
+        if match:
+            value_str = match.group(1).replace("p", ".")
+            try:
+                return float(value_str)
+            except ValueError:
+                return np.nan
+
+    return np.nan
+
+
+def _get_disturbance_from_case_folder(case_dir: Path) -> float:
+    """
+    Determine disturbance value from folder name first, then fall back to meta_data.json.
+
+    Supports folders such as:
+        bound_0p01000
+        disturbance_0p01000
+        wmax_0p01000
+    """
+    disturbance = _parse_disturbance_value_from_folder_name(case_dir.name)
+
+    if np.isfinite(disturbance):
+        return disturbance
+
+    try:
+        params = _load_meta_data(case_dir)
+
+        candidate_keys = [
+            "disturbance_bound",
+            "process_noise_bound",
+            "process_noise_clip",
+            "noise_bound",
+            "w_bound",
+            "w_max",
+            "max_disturbance",
+        ]
+
+        for key in candidate_keys:
+            if key in params:
+                value = params[key]
+
+                # Handle scalar values.
+                if np.isscalar(value):
+                    return float(value)
+
+                # Handle vector/list values by taking the max absolute value.
+                arr = np.asarray(value, dtype=float)
+                if arr.size > 0:
+                    return float(np.nanmax(np.abs(arr)))
+
+    except Exception:
+        pass
+
+    return np.nan
+
+
+def _find_disturbance_case_dirs(sweep_root: Path) -> List[Path]:
+    """
+    Return subfolders of a disturbance sweep that look like disturbance cases.
+    """
+    case_dirs = []
+
+    for p in sorted(sweep_root.iterdir()):
+        if not p.is_dir():
+            continue
+
+        disturbance = _parse_disturbance_value_from_folder_name(p.name)
+        has_trials = any(
+            child.is_dir() and child.name.startswith("trial_")
+            for child in p.iterdir()
+        )
+
+        if np.isfinite(disturbance) or has_trials:
+            case_dirs.append(p)
+
+    return case_dirs
+
+
+def collect_disturbance_sweep_min_clearance_statistics(
+    sweep_folder_path: str | Path,
+    architectures: Tuple[str, ...] = ("LocalCBF", "MPC-CBF", "Combined"),
+    obstacle_index: int = 1,
+    include_safety_margin: bool = False,
+) -> pd.DataFrame:
+    """
+    Collect minimum signed clearances over all disturbance cases and architectures.
+
+    For each disturbance case and architecture, computes:
+        - median_min_clearance
+        - min_min_clearance
+        - max_min_clearance
+        - mean_min_clearance
+        - n_trials
+
+    The per-trial quantity is:
+        d_min_trial = min over time and monitored robot points
+                      ||p_j(q_k) - O|| - r
+
+    If include_safety_margin=False, r is the physical obstacle radius.
+    If include_safety_margin=True, r includes cbf_safety_margin.
+    """
+    sweep_root = Path(sweep_folder_path)
+
+    if not sweep_root.exists():
+        raise FileNotFoundError(f"Sweep folder not found: {sweep_root}")
+
+    case_dirs = _find_disturbance_case_dirs(sweep_root)
+
+    if len(case_dirs) == 0:
+        raise FileNotFoundError(f"No disturbance case folders found in {sweep_root}")
+
+    rows = []
+
+    for case_dir in case_dirs:
+        disturbance = _get_disturbance_from_case_folder(case_dir)
+
+        if not np.isfinite(disturbance):
+            print(f"Skipping {case_dir}: could not determine disturbance value.")
+            continue
+
+        try:
+            params = _load_meta_data(case_dir)
+            link_lengths = _get_link_lengths_from_params(params)
+            cbf_link_samples = int(params.get("cbf_link_samples", 3))
+
+            obstacle_center, obstacle_radius = _get_obstacle_center_and_radius(
+                params=params,
+                obstacle_index=obstacle_index,
+                include_safety_margin=include_safety_margin,
+            )
+
+        except Exception as exc:
+            print(f"Skipping {case_dir}: could not load obstacle/robot data ({exc}).")
+            continue
+
+        for arch in architectures:
+            trial_mins = _load_trial_min_clearances_for_case(
+                case_dir=case_dir,  # generic case folder; function name is delay-specific only
+                architecture=arch,
+                obstacle_center=obstacle_center,
+                obstacle_radius=obstacle_radius,
+                link_lengths=link_lengths,
+                cbf_link_samples=cbf_link_samples,
+                include_base=False,
+            )
+
+            if trial_mins.size == 0:
+                print(f"Skipping {case_dir.name} / {arch}: no valid trials found.")
+                continue
+
+            rows.append(
+                {
+                    "disturbance": float(disturbance),
+                    "architecture": arch,
+                    "n_trials": int(trial_mins.size),
+                    "median_min_clearance": float(np.nanmedian(trial_mins)),
+                    "min_min_clearance": float(np.nanmin(trial_mins)),
+                    "max_min_clearance": float(np.nanmax(trial_mins)),
+                    "mean_min_clearance": float(np.nanmean(trial_mins)),
+                    "trial_min_clearances": trial_mins,
+                }
+            )
+
+            print(
+                f"{case_dir.name} / {arch}: "
+                f"{trial_mins.size} trials, "
+                f"median d_min = {np.nanmedian(trial_mins):.4f} m, "
+                f"range = [{np.nanmin(trial_mins):.4f}, {np.nanmax(trial_mins):.4f}] m"
+            )
+
+    if len(rows) == 0:
+        raise ValueError(
+            f"No valid disturbance-sweep clearance statistics found in {sweep_root}"
+        )
+
+    stats = pd.DataFrame(rows)
+
+    architecture_order = {
+        "Nominal": 0,
+        "LocalCBF": 1,
+        "MPC-CBF": 2,
+        "Combined": 3,
+    }
+
+    stats["architecture_order"] = stats["architecture"].map(architecture_order).fillna(99)
+    stats = (
+        stats
+        .sort_values(["disturbance", "architecture_order"])
+        .drop(columns=["architecture_order"])
+        .reset_index(drop=True)
+    )
+
+    return stats
+
+
+def plot_min_clearance_over_disturbance(
+    sweep_folder_path: str | Path,
+    output_name: str = "min_clearance_over_disturbance",
+    output_folder: str | Path | None = None,
+    architectures: Tuple[str, ...] = ("LocalCBF", "MPC-CBF", "Combined"),
+    obstacle_index: int = 1,
+    include_safety_margin: bool = False,
+    save_pdf: bool = True,
+    save_png: bool = True,
+    save_svg: bool = False,
+    save_csv: bool = True,
+    dpi: int = 800,
+    figsize: Tuple[float, float] = (3.5, 2.4),
+    xlim: Tuple[float, float] | None = None,
+    ylim: Tuple[float, float] | None = None,
+    axis_fontsize: float = 8,
+    tick_fontsize: float = 7,
+    legend_fontsize: float = 7,
+    legend_loc: str = "best",
+    legend_ncol: int = 3,
+    envelope_alpha: float = 0.15,
+    envelope_edge_linewidth: float = 0.6,
+    envelope_edge_alpha: float = 0.55,
+    marker_size: float = 4.0,
+    grid_alpha: float = 0.3,
+    show_plot: bool = False,
+):
+    """
+    Plot minimum signed robot-obstacle clearance over disturbance magnitude.
+
+    For each disturbance bound and architecture:
+        - each trial gives one scalar:
+              d_min_trial = min over time and monitored robot points
+                            ||p_j(q_k) - O|| - r
+        - line shows median over trials
+        - shaded region shows min/max over trials
+
+    The red dashed line at zero is the physical collision boundary if
+    include_safety_margin=False.
+    """
+    sweep_root = Path(sweep_folder_path)
+
+    stats = collect_disturbance_sweep_min_clearance_statistics(
+        sweep_folder_path=sweep_root,
+        architectures=architectures,
+        obstacle_index=obstacle_index,
+        include_safety_margin=include_safety_margin,
+    )
+
+    style = _get_distance_plot_style()
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    plotted_architectures = []
+
+    for arch in architectures:
+        arch_stats = stats[stats["architecture"] == arch].copy()
+
+        if arch_stats.empty:
+            print(f"Skipping {arch}: no statistics available.")
+            continue
+
+        if arch not in style["arch_styles"]:
+            print(f"Skipping {arch}: no style defined.")
+            continue
+
+        arch_stats = arch_stats.sort_values("disturbance")
+
+        x = arch_stats["disturbance"].to_numpy(dtype=float)
+        y_med = arch_stats["median_min_clearance"].to_numpy(dtype=float)
+        y_min = arch_stats["min_min_clearance"].to_numpy(dtype=float)
+        y_max = arch_stats["max_min_clearance"].to_numpy(dtype=float)
+
+        arch_style = style["arch_styles"][arch]
+        color = arch_style["color"]
+
+        # Min-max envelope over trials
+        ax.fill_between(
+            x,
+            y_min,
+            y_max,
+            color=color,
+            alpha=envelope_alpha,
+            linewidth=0.0,
+            zorder=1,
+        )
+
+        # Thin envelope boundary
+        if envelope_edge_linewidth > 0:
+            ax.plot(
+                x,
+                y_min,
+                color=color,
+                linewidth=envelope_edge_linewidth,
+                alpha=envelope_edge_alpha,
+                zorder=2,
+            )
+            ax.plot(
+                x,
+                y_max,
+                color=color,
+                linewidth=envelope_edge_linewidth,
+                alpha=envelope_edge_alpha,
+                zorder=2,
+            )
+
+        # Median line
+        ax.plot(
+            x,
+            y_med,
+            color=color,
+            linestyle=arch_style["linestyle"],
+            linewidth=arch_style["linewidth"],
+            marker="o",
+            markersize=marker_size,
+            label=arch_style["label"],
+            zorder=3,
+        )
+
+        plotted_architectures.append(arch)
+
+    # Collision boundary
+    ax.axhline(
+        0.0,
+        color=style["boundary_color"],
+        linestyle=style["boundary_linestyle"],
+        linewidth=style["boundary_linewidth"],
+        zorder=4,
+    )
+
+    # Axes
+    ax.set_xlabel(r"Disturbance bound", fontsize=axis_fontsize)
+    ax.set_ylabel(r"$d_{\min}$ (m)", fontsize=axis_fontsize)
+    ax.tick_params(axis="both", labelsize=tick_fontsize)
+    ax.grid(True, alpha=grid_alpha)
+
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+
+    fig.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=legend_ncol,
+        fontsize=legend_fontsize,
+        frameon=True,
+    )
+
+    # Save
+    out_dir = Path(output_folder) if output_folder is not None else sweep_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_base = out_dir / output_name
+
+    if save_csv:
+        csv_path = out_base.with_suffix(".csv")
+        csv_stats = stats.drop(columns=["trial_min_clearances"], errors="ignore")
+        csv_stats.to_csv(csv_path, index=False)
+        print(f"Saved disturbance-clearance statistics to: {csv_path}")
+
+    if save_pdf:
+        fig.savefig(out_base.with_suffix(".pdf"), bbox_inches="tight")
+    if save_svg:
+        fig.savefig(out_base.with_suffix(".svg"), bbox_inches="tight")
+    if save_png:
+        fig.savefig(out_base.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
+
+    print("Saved disturbance-clearance plot to:")
     if save_pdf:
         print(f"  {out_base.with_suffix('.pdf')}")
     if save_svg:

@@ -1,17 +1,27 @@
+# Python bytecode/cache
 __pycache__/
 *.py[cod]
 *.pyo
 .ipynb_checkpoints/
 
+# Local environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editor settings
+.vscode/
+
+# Generated simulation output
 data/*
 !data/.gitignore
 
-plots/*
-!plots/.gitignore
-
+# Media/output files
 *.gif
 !assets/*.gif
 *.mp4
 *.avi
 *.xlsx
 *.csv
+*.npy

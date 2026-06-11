@@ -81,34 +81,57 @@ def compute_obstacle_safety_metrics(params, dynamics, q_traj: np.ndarray) -> dic
     """
     Compute obstacle safety metrics over the executed trajectory.
 
-    CBF:
-        h = ||p - O||^2 - r_eff^2
+    Two notions are tracked:
 
-    Signed clearance:
-        d_clear = ||p - O|| - r_eff
+    1. Raw / physical obstacle clearance:
+        raw_clearance = ||p - O|| - r
+
+       Collision-free means:
+        raw_clearance >= 0
+
+    2. Margin / CBF clearance:
+        margin_clearance = ||p - O|| - (r + cbf_safety_margin)
+
+       Margin respected means:
+        margin_clearance >= 0
     """
     if getattr(params, "obstacle_scene", None) is None:
         return {
             "min_cbf_value": np.inf,
             "min_signed_clearance": np.inf,
+            "min_raw_clearance": np.inf,
             "cbf_violation_count": 0,
             "violation_step_count": 0,
+            "collision_count": 0,
+            "collision_step_count": 0,
             "max_violation_depth": 0.0,
+            "max_collision_depth": 0.0,
+            "margin_respected": True,
+            "collision_free": True,
         }
 
     margin = float(getattr(params, "cbf_safety_margin", 0.0))
 
     min_h = np.inf
-    min_clearance = np.inf
+    min_margin_clearance = np.inf
+    min_raw_clearance = np.inf
+
     cbf_violation_count = 0
     violation_step_count = 0
+
+    collision_count = 0
+    collision_step_count = 0
+
     max_violation_depth = 0.0
+    max_collision_depth = 0.0
 
     for q in q_traj:
         if not np.all(np.isfinite(q)):
             continue
 
-        step_has_violation = False
+        step_has_margin_violation = False
+        step_has_collision = False
+
         points = _monitored_points_from_q(params, dynamics, q)
 
         for obs in params.obstacle_scene.obstacles:
@@ -116,32 +139,60 @@ def compute_obstacle_safety_metrics(params, dynamics, q_traj: np.ndarray) -> dic
                 continue
 
             center = np.asarray(obs.center, dtype=float).reshape(2)
-            r_eff = float(obs.radius) + margin
+            r = float(obs.radius)
+            r_eff = r + margin
 
             for p in points:
                 p = np.asarray(p, dtype=float).reshape(2)
 
                 dist = float(np.linalg.norm(p - center))
-                clearance = dist - r_eff
-                h = dist**2 - r_eff**2
 
-                min_h = min(min_h, h)
-                min_clearance = min(min_clearance, clearance)
+                raw_clearance = dist - r
+                margin_clearance = dist - r_eff
+                h_margin = dist**2 - r_eff**2
 
-                if h < 0.0:
+                min_raw_clearance = min(min_raw_clearance, raw_clearance)
+                min_margin_clearance = min(min_margin_clearance, margin_clearance)
+                min_h = min(min_h, h_margin)
+
+                # Violation of the inflated CBF/safety-margin set.
+                if margin_clearance < 0.0:
                     cbf_violation_count += 1
-                    step_has_violation = True
-                    max_violation_depth = max(max_violation_depth, -clearance)
+                    step_has_margin_violation = True
+                    max_violation_depth = max(max_violation_depth, -margin_clearance)
 
-        if step_has_violation:
+                # Actual physical collision.
+                if raw_clearance < 0.0:
+                    collision_count += 1
+                    step_has_collision = True
+                    max_collision_depth = max(max_collision_depth, -raw_clearance)
+
+        if step_has_margin_violation:
             violation_step_count += 1
 
+        if step_has_collision:
+            collision_step_count += 1
+
+    margin_respected = bool(min_margin_clearance >= 0.0)
+    collision_free = bool(min_raw_clearance >= 0.0)
+
     return {
+        # Existing names, kept for compatibility.
         "min_cbf_value": float(min_h),
-        "min_signed_clearance": float(min_clearance),
+        "min_signed_clearance": float(min_margin_clearance),
         "cbf_violation_count": int(cbf_violation_count),
         "violation_step_count": int(violation_step_count),
         "max_violation_depth": float(max_violation_depth),
+
+        # New physically interpretable metrics.
+        "min_raw_clearance": float(min_raw_clearance),
+        "collision_count": int(collision_count),
+        "collision_step_count": int(collision_step_count),
+        "max_collision_depth": float(max_collision_depth),
+
+        # Explicit booleans.
+        "margin_respected": margin_respected,
+        "collision_free": collision_free,
     }
 
 
@@ -344,10 +395,8 @@ def post_process_single_run(
         q_traj=q[eval_slice],
     )
 
-    stayed_safe = bool(
-        safety["cbf_violation_count"] == 0
-        and safety["min_cbf_value"] >= 0.0
-    )
+    stayed_safe = bool(safety["collision_free"])
+    stayed_with_margin = bool(safety["margin_respected"])   
 
     # ------------------------------------------------------------
     # Control effort and smoothness
@@ -480,12 +529,21 @@ def post_process_single_run(
         "cost_per_step": cost_per_step,
 
         # Safety
-        "stayed_safe": stayed_safe,
+        "stayed_safe": stayed_safe, #means: collision free
+        "stayed_with_margin": stayed_with_margin,
+
         "min_cbf_value": safety["min_cbf_value"],
-        "min_signed_clearance": safety["min_signed_clearance"],
-        "cbf_violation_count": safety["cbf_violation_count"],
-        "violation_step_count": safety["violation_step_count"],
-        "max_violation_depth": safety["max_violation_depth"],
+        "min_signed_clearance": safety["min_signed_clearance"],   # clearance to inflated obstacle
+        "min_raw_clearance": safety["min_raw_clearance"],         # clearance to physical obstacle
+
+        "cbf_violation_count": safety["cbf_violation_count"],     # margin violations
+        "violation_step_count": safety["violation_step_count"],   # steps with margin violations
+
+        "collision_count": safety["collision_count"],
+        "collision_step_count": safety["collision_step_count"],
+
+        "max_violation_depth": safety["max_violation_depth"],     # depth into safety margin
+        "max_collision_depth": safety["max_collision_depth"],     # depth into physical obstacle
 
         # Torque/control
         "max_abs_control_input": max_abs_control_input,
@@ -597,10 +655,16 @@ def print_run_summary(metrics: dict, arch_name: str | None = None,
         f" | steps: {fmt_int(metrics.get('steps_to_goal'))}"
     )
 
+    stayed_safe = metrics.get("stayed_safe", False)
+    stayed_with_margin = metrics.get("stayed_with_margin", False)
+
     print(
-        f"Safety: {'safe' if stayed_safe else 'VIOLATED'}"
-        f" | min clearance: {fmt_float(metrics.get('min_signed_clearance'), ' m', 4)}"
-        f" | violations: {fmt_int(metrics.get('violation_step_count'))} steps"
+        f"Safety: {'collision-free' if stayed_safe else 'COLLISION'}"
+        f" | raw clearance: {fmt_float(metrics.get('min_raw_clearance'), ' m', 4)}"
+        f" | margin clearance: {fmt_float(metrics.get('min_signed_clearance'), ' m', 4)}"
+        f" | margin respected: {fmt_bool(stayed_with_margin)}"
+        f" | collision steps: {fmt_int(metrics.get('collision_step_count'))}"
+        f" | margin-violation steps: {fmt_int(metrics.get('violation_step_count'))}"
     )
 
     print(
@@ -624,7 +688,7 @@ def print_run_summary(metrics: dict, arch_name: str | None = None,
             f" | max slack {fmt_float(metrics.get('local_cbf_slack_max'), precision=3)}"
         )
 
-    if arch in {"RemoteMPC-CBF", "Combined"}:
+    if arch in {"MPC-CBF", "Combined"}:
         print(
             f"Remote MPC-CBF: activations {fmt_int(metrics.get('remote_cbf_activation_count'))}"
             f" ({fmt_float(100.0 * metrics.get('remote_cbf_activation_rate', np.nan), '%', 2)})"
@@ -637,7 +701,7 @@ def print_run_summary(metrics: dict, arch_name: str | None = None,
     # Solver time information only where relevant
     solver_parts = []
 
-    if arch in {"RemoteMPC-CBF", "Combined", "Nominal", "LocalCBF"}:
+    if arch in {"MPC-CBF", "Combined", "Nominal", "LocalCBF"}:
         solver_parts.append(
             f"MPC mean/max: "
             f"{fmt_float(1000.0 * metrics.get('mean_mpc_solve_time', np.nan), ' ms', 1)} / "

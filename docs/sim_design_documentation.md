@@ -33,12 +33,15 @@ $M(q)$ is the inertia matrix, $C(q,\dot q)\dot q$ collects Coriolis and centrifu
 The rigid-body dynamics follow the standard formulation for serial robotic manipulators. For more detail please refer to [Murray, Li, and Sastry, *A Mathematical Introduction to Robotic Manipulation*](https://www.ce.cit.tum.de/fileadmin/w00cgn/rm/pdf/murray-li-sastry-94-complete.pdf).
 
 For a serial manipulator, the inertia matrix can be constructed from translational and rotational Jacobians of the link center-of-mass frames
+
 $$
 M(q) =\sum_{i=1}^{3}\left( m_i J_{v_i}(q)^\top J_{v_i}(q) + J_{\omega_i}(q)^\top I_i J_{\omega_i}(q)\right),
 $$
+
 where $m_i$ is the mass of link $i$, $I_i$ is the corresponding link inertia, $J_{v_i}(q)$ is the translational Jacobian of the center of mass of link $i$, and $J_{\omega_i}(q)$ is the angular-velocity Jacobian.
 
 The Coriolis matrix is obtained from the Christoffel symbols
+
 $$
 C_{ij}(q,\dot q) = 
 \sum_{k=1}^{3}
@@ -50,6 +53,7 @@ $c_{ijk}(q) =
 \left(\frac{\partial M_{ij}}{\partial q_k} + \frac{\partial M_{ik}}{\partial q_j} -\frac{\partial M_{jk}}{\partial q_i} \right)$.
 
 The gravity vector is obtained from the potential energy $P(q)$ as
+
 $$
 G_i(q)=\frac{\partial P(q)}{\partial q_i}.
 $$
@@ -167,58 +171,34 @@ In our evaluation, we regard a run as unsafe if a single point collides with an 
 ### Remote MPC Problem
 
 The remote MPC operates on the acceleration-level state
-$
-x_j =
-\begin{bmatrix}
+
+$x_j =\begin{bmatrix}
 q_j \
 \dot q_j
-\end{bmatrix},
-$
-where $q_j \in \mathbb{R}^3$ are the joint angles and $\dot q_j \in \mathbb{R}^3$ are the joint velocities. The "control input" and thus the MPC decision variable is the desired joint acceleration
-$
-u_j = \ddot q_{\mathrm{d},j}
-$.
+\end{bmatrix},$
+
+where $q_j \in \mathbb{R}^3$ are the joint angles and $\dot q_j \in \mathbb{R}^3$ are the joint velocities. The "control input" and thus the MPC decision variable is the desired joint acceleration $u_j = \ddot q_{\mathrm{d},j}$.
 
 At each remote control update, the MPC is initialized with the predicted state estimate $\hat x_k$ and solves an optimal control problem over a horizon of length $N$. It uses the acceleration level dynamics described above in (1).  
 The implemented MPC minimizes a joint-space tracking objective with additional penalties on joint velocity, acceleration effort, and acceleration changes (a.k.a. jerk):
 
-$$
-\begin{aligned}
-\min_{u_0,\ldots,u_{N-1}}
-\quad
-J
-=&
-\sum_{j=0}^{N-1}
-\Big(
-\lVert q_j-q_{d,j} \rVert_{Q_q}^2
-+
-\lVert \dot{q}_j-\dot{q}_{d,j} \rVert_{Q_{v}}^2
-+
-\lVert u_j \rVert_{R}^2
-+
+$$\begin{aligned}
+\min_{u_0,\ldots,u_{N-1}}\quad
+J = &\sum_{j=0}^{N-1}
+\Big(\lVert q_j-q_{d,j} \rVert_{Q_q}^2 +
+\lVert \dot{q}_j-\dot{q}_{d,j} \rVert_{Q_{v}}^2 +
+\lVert u_j \rVert_{R}^2 +
 \lVert \Delta u_j \rVert_{R_{\mathrm{jerk}}}^2
-\Big)
-\\
-&+
-\lVert q_N-q_{d,N} \rVert_{Q_{qN}}^2
-+
-\lVert \dot{q}_N-\dot{q}_{d,N} \rVert_{Q_{vN}}^2
-+ \rho \delta_i ^2
-\\
+\Big)\\
+&+ \lVert q_N-q_{d,N} \rVert_{Q_{qN}}^2
++ \lVert \dot{q}_N-\dot{q}_{d,N} \rVert_{Q_{vN}}^2
++ \rho \delta_i ^2 \\
 \mathrm{s.t.} \quad &
-x_0 = \hat x_k,
-\\
-&
-x_{j+1} = f_{\mathrm{acc}}(x_j,u_j),
-\qquad j=0,\ldots,N-1,
-\\
-&
-x_j \in \mathcal{X},
-\qquad j=0,\ldots,N,
-\\
-&
-u_j \in \mathcal{U},
-\qquad j=0,\ldots,N-1.\\
+x_0 = \hat x_k,\\
+&x_{j+1} = f_{\mathrm{acc}}(x_j,u_j),
+\qquad j=0,\ldots,N-1,\\
+&x_j \in \mathcal{X},\qquad j=0,\ldots,N,\\
+&u_j \in \mathcal{U},\qquad j=0,\ldots,N-1.\\
 &\delta_i \geq 0, \quad \rho > 0
 \end{aligned}
 $$

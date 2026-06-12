@@ -231,7 +231,6 @@ The code was tested with Python 3.10. It uses the following main packages:
 * `pandas`
 * `matplotlib`
 * `casadi`
-* `cvxpy`
 * `openpyxl`
 * `pillow`
 

@@ -321,6 +321,15 @@ def set_temp_params(params):
     params.tau_residual = 0 # no uncompensated delay
     params.tau = params.tau_known + params.tau_residual
     
+    #MPC Weighting
+    params.Qq_mpc =np.diag([10.0, 10.0, 5.0])
+    params.Qq_terminal_mpc= np.diag([50.0, 50.0, 50.0])
+    params.Qdq_mpc= np.diag([5.0, 5.0, 5.0])
+    params.Qdq_terminal_mpc= np.diag([30.0, 30.0, 15.0])
+    params.Rddq_mpc= np.diag([5, 5, 3])
+    params.Rjerk_mpc = np.diag([2.0, 2.0, 1.0])
+    
+    
     # Waypoints and Obstacles
     params.waypoints = [(0.18, -0.12), (0.23, 0.18), (0.6, 0.3)]
     params.scenario_obstacle_centers = [(0.0, 0.3), (0.4, 0.37)]
@@ -329,7 +338,7 @@ def set_temp_params(params):
     scenario = params._rebuild_scenario()
 
     #Disturbance
-    params.torque_disturbance_bound = 0.02 #0.1 -> violation local CBF
+    params.torque_disturbance_bound = 0.05 #0.1 -> violation local CBF
     params.torque_disturbance_std = params.torque_disturbance_bound/2
     
     #for more parameters: go to src/sim_module/params.py

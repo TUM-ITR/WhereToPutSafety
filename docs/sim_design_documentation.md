@@ -204,7 +204,7 @@ J
 \|\dot q_N-\dot q_{d,N}\|_{Q_{v,N}}^2
 +
 \rho \delta_i^2
-\\[0.2cm]
+\\
 \mathrm{s.t.} \quad
 &
 x_0 = \hat x_k,

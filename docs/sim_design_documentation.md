@@ -168,21 +168,22 @@ In our evaluation, we regard a run as unsafe if a single point collides with an 
 
 ## 2.4 Remote MPC
 
-### Remote MPC Problem
-
 The remote MPC operates on the acceleration-level state
 
-$x_j =\begin{bmatrix}
-q_j \
+$$
+x_j =\begin{bmatrix}
+q_j \\
 \dot q_j
-\end{bmatrix},$
+\end{bmatrix},
+$$
 
 where $q_j \in \mathbb{R}^3$ are the joint angles and $\dot q_j \in \mathbb{R}^3$ are the joint velocities. The "control input" and thus the MPC decision variable is the desired joint acceleration $u_j = \ddot q_{\mathrm{d},j}$.
 
 At each remote control update, the MPC is initialized with the predicted state estimate $\hat x_k$ and solves an optimal control problem over a horizon of length $N$. It uses the acceleration level dynamics described above in (1).  
 The implemented MPC minimizes a joint-space tracking objective with additional penalties on joint velocity, acceleration effort, and acceleration changes (a.k.a. jerk):
 
-$$\begin{aligned}
+$$
+\begin{aligned}
 \min_{u_0,\ldots,u_{N-1}}\quad
 J = &\sum_{j=0}^{N-1}
 \Big(\lVert q_j-q_{d,j} \rVert_{Q_q}^2 +

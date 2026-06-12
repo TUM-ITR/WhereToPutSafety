@@ -33,23 +33,12 @@ $M(q)$ is the inertia matrix, $C(q,\dot q)\dot q$ collects Coriolis and centrifu
 The rigid-body dynamics follow the standard formulation for serial robotic manipulators. For more detail please refer to [Murray, Li, and Sastry, *A Mathematical Introduction to Robotic Manipulation*](https://www.ce.cit.tum.de/fileadmin/w00cgn/rm/pdf/murray-li-sastry-94-complete.pdf).
 
 For a serial manipulator, the inertia matrix can be constructed from translational and rotational Jacobians of the link center-of-mass frames
-
 $$
-M(q)
-=
-
-\sum_{i=1}^{3}
-\left(
-m_i J_{v_i}(q)^\top J_{v_i}(q)
-+
-J_{\omega_i}(q)^\top I_i J_{\omega_i}(q)
-\right),
+M(q) =\sum_{i=1}^{3}\left( m_i J_{v_i}(q)^\top J_{v_i}(q) + J_{\omega_i}(q)^\top I_i J_{\omega_i}(q)\right),
 $$
-
 where $m_i$ is the mass of link $i$, $I_i$ is the corresponding link inertia, $J_{v_i}(q)$ is the translational Jacobian of the center of mass of link $i$, and $J_{\omega_i}(q)$ is the angular-velocity Jacobian.
 
 The Coriolis matrix is obtained from the Christoffel symbols
-
 $$
 C_{ij}(q,\dot q) = 
 \sum_{k=1}^{3}
@@ -61,11 +50,8 @@ $c_{ijk}(q) =
 \left(\frac{\partial M_{ij}}{\partial q_k} + \frac{\partial M_{ik}}{\partial q_j} -\frac{\partial M_{jk}}{\partial q_i} \right)$.
 
 The gravity vector is obtained from the potential energy $P(q)$ as
-
 $$
-G_i(q)
-=
-\frac{\partial P(q)}{\partial q_i}.
+G_i(q)=\frac{\partial P(q)}{\partial q_i}.
 $$
 
 In the implementation, these terms are evaluated for the planar 3-link robot in `src/plant_module/robot_dynamics.py`.
@@ -147,10 +133,7 @@ The local CBF filter is a myopic safety filter operating at the local control ra
 The nominal acceleration command is denoted by $u_{\mathrm{nom},k}$. The local CBF solves a problem of the form
 
 $$\begin{aligned}
-u_k^\star
-=
-\arg\min_{u_k}
-\quad &
+u_k^\star = \arg\min_{u_k} \quad &
 \lVert u_k - u_{\mathrm{nom},k}\rVert^2 \\
 \mathrm{s.t.}
 \quad &
@@ -243,9 +226,7 @@ $$
 The joint-position tracking error is computed using the wrapped angle error
 
 $$
-e_{q,j}
-=
-\operatorname{wrap}(q_j - q_{\mathrm{ref},j}),
+e_{q,j} = \mathrm{wrap}(q_j - q_{\mathrm{ref},j}),
 $$
 
 to account for the periodicity of revolute joints. The acceleration-change term is defined as
@@ -300,7 +281,7 @@ The remote MPC uses the predicted state as its initial condition. In this way, t
 
 This delay-compensation mechanism is central to the comparison between local and remote CBF placement. A remote CBF is predictive and can reason over a horizon, but its constraints are imposed using delayed and predicted state information. A local CBF acts myopically, but it operates on the most recent local state and at a higher sampling rate.
 
-It is possible to add uncompensated delay, by choosing `params.tau_residual>0`. However, we have found that already a value of $2$ (i.e. $40$ms of uncompensated delay) causes oscillations.
+It is possible to add uncompensated delay, by choosing `params.tau_residual > 0`. However, we have found that already a value of $2$ (i.e. $40$ms of uncompensated delay) causes oscillations.
 
 ## 4. Simulation Parameters Used in the Paper
 
@@ -329,12 +310,12 @@ This section summarizes the main parameter values used for the paper simulations
 | Parameter                                      |                                     Value | Unit / comment   |
 | ---------------------------------------------- | ----------------------------------------: | ---------------- |
 | Prediction horizon $N$                         |                                      $30$ | remote MPC steps |
-| Joint-position weight $Q_q$                    |  $\operatorname{diag}(10.0,\ 10.0,\ 5.0)$ | -                |
-| Joint-velocity weight $Q_v$                    |    $\operatorname{diag}(5.0,\ 5.0,\ 5.0)$ | -                |
-| Input acceleration weight $R$                  |    $\operatorname{diag}(5.0,\ 5.0,\ 3.0)$ | -                |
-| Acceleration-change weight $R_{\mathrm{jerk}}$ |    $\operatorname{diag}(2.0,\ 2.0,\ 1.0)$ | -                |
-| Terminal joint-position weight $Q_{q,N}$       | $\operatorname{diag}(50.0,\ 50.0,\ 50.0)$ | -                |
-| Terminal joint-velocity weight $Q_{v,N}$       | $\operatorname{diag}(30.0,\ 30.0,\ 15.0)$ | -                |
+| Joint-position weight $Q_q$                    |  $\mathrm{diag}(10.0,\ 10.0,\ 5.0)$ | -                |
+| Joint-velocity weight $Q_v$                    |    $\mathrm{diag}(5.0,\ 5.0,\ 5.0)$ | -                |
+| Input acceleration weight $R$                  |    $\mathrm{diag}(5.0,\ 5.0,\ 3.0)$ | -                |
+| Acceleration-change weight $R_{\mathrm{jerk}}$ |    $\mathrm{diag}(2.0,\ 2.0,\ 1.0)$ | -                |
+| Terminal joint-position weight $Q_{q,N}$       | $\mathrm{diag}(50.0,\ 50.0,\ 50.0)$ | -                |
+| Terminal joint-velocity weight $Q_{v,N}$       | $\mathrm{diag}(30.0,\ 30.0,\ 15.0)$ | -                |
 | Acceleration bound                             |                                      $20$ | $rad/s^2$        |
 
 ### 4.4 CBF Parameters

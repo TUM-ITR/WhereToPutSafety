@@ -184,23 +184,46 @@ The implemented MPC minimizes a joint-space tracking objective with additional p
 
 $$
 \begin{aligned}
-\min_{u_0,\ldots,u_{N-1}}\quad
-J = &\sum_{j=0}^{N-1}
-\Big(\lVert q_j-q_{d,j} \rVert_{Q_q}^2 +
-\lVert \dot{q}_j-\dot{q}_{d,j} \rVert_{Q_{v}}^2 +
-\lVert u_j \rVert_{R}^2 +
-\lVert \Delta u_j \rVert_{R_{\mathrm{jerk}}}^2
-\Big)\\
-&+ \lVert q_N-q_{d,N} \rVert_{Q_{qN}}^2
-+ \lVert \dot{q}_N-\dot{q}_{d,N} \rVert_{Q_{vN}}^2
-+ \rho \delta_i ^2 \\
-\mathrm{s.t.} \quad &
-x_0 = \hat x_k,\\
-&x_{j+1} = f_{\mathrm{acc}}(x_j,u_j),
-\qquad j=0,\ldots,N-1,\\
-&x_j \in \mathcal{X},\qquad j=0,\ldots,N,\\
-&u_j \in \mathcal{U},\qquad j=0,\ldots,N-1.\\
-&\delta_i \geq 0, \quad \rho > 0
+\min_{u_0,\ldots,u_{N-1}} \quad
+J
+=&
+\sum_{j=0}^{N-1}
+\Big(
+\|q_j-q_{d,j}\|_{Q_q}^2
++
+\|\dot q_j-\dot q_{d,j}\|_{Q_v}^2
++
+\|u_j\|_{R}^2
++
+\|\Delta u_j\|_{R_{\mathrm{jerk}}}^2
+\Big)
+\\
+&+
+\|q_N-q_{d,N}\|_{Q_{q,N}}^2
++
+\|\dot q_N-\dot q_{d,N}\|_{Q_{v,N}}^2
++
+\rho \delta_i^2
+\\[0.2cm]
+\mathrm{s.t.} \quad
+&
+x_0 = \hat x_k,
+\\
+&
+x_{j+1} = f_{\mathrm{acc}}(x_j,u_j),
+\qquad j=0,\ldots,N-1,
+\\
+&
+x_j \in \mathcal{X},
+\qquad j=0,\ldots,N,
+\\
+&
+u_j \in \mathcal{U},
+\qquad j=0,\ldots,N-1,
+\\
+&
+\delta_i \geq 0,
+\qquad \rho > 0.
 \end{aligned}
 $$
 
